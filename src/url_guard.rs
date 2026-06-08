@@ -10,10 +10,13 @@
 // loopback/private/link-local/unique-local range — unless the operator has
 // explicitly opted into private hosts.
 //
-// This is best-effort: a hostname could resolve to a public IP here and a
-// private one when Chrome later resolves it (DNS rebinding). It nonetheless
-// blocks the overwhelmingly common cases (literal private IPs, `localhost`,
-// and names that already resolve internally).
+// The guard is applied twice for browsing: once to the URL the caller supplied
+// and again to the *final* URL after Chrome follows redirects (see
+// `BrowserManager::navigate`), which closes the redirect-to-internal-host
+// bypass. It remains best-effort against pure DNS rebinding: a hostname could
+// resolve to a public IP at check time and a private one when Chrome resolves
+// it microseconds later. Pinning Chrome to the vetted IP (host-resolver-rules
+// or an interception proxy) would close that residual gap.
 
 use crate::error::{Result, WebError};
 use std::net::IpAddr;

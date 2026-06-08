@@ -14,6 +14,7 @@
 
 use crate::config::WebConfig;
 use crate::error::{Result, WebError, WebMcpError};
+use crate::url_guard::UrlGuard;
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::{Browser, BrowserConfig, Page};
@@ -49,6 +50,11 @@ struct Live {
 /// Owns the persistent headless-Chrome instance and serves page operations.
 pub struct BrowserManager {
     config: Arc<WebConfig>,
+    /// SSRF guard, re-applied to the *final* URL after redirects: Chrome does
+    /// its own DNS resolution and follows redirects unchecked, so a public URL
+    /// that 3xx-redirects to a private/metadata host would otherwise slip past
+    /// the pre-navigation guard. See `navigate`.
+    guard: UrlGuard,
     inner: Mutex<Option<Live>>,
 }
 
@@ -63,8 +69,10 @@ struct LinkJs {
 impl BrowserManager {
     /// Create a manager. No browser is launched until the first request.
     pub fn new(config: Arc<WebConfig>) -> Self {
+        let guard = UrlGuard::new(config.allow_private_hosts);
         Self {
             config,
+            guard,
             inner: Mutex::new(None),
         }
     }
@@ -122,7 +130,13 @@ impl BrowserManager {
         Ok(page)
     }
 
-    /// Navigate `page` to `url`, bounded by the configured navigation timeout.
+    /// Navigate `page` to `url`, bounded by the configured navigation timeout,
+    /// then re-validate the landed-on URL against the SSRF guard.
+    ///
+    /// The pre-navigation guard only vets the URL the caller supplied. Chrome
+    /// follows redirects and re-resolves DNS itself, so a public origin that
+    /// 3xx-redirects to an internal/metadata host must be caught here, after the
+    /// fact, by re-checking `page.url()`.
     async fn navigate(&self, page: &Page, url: &Url) -> Result<()> {
         let dur = Duration::from_millis(self.config.nav_timeout_ms);
         let nav = async {
@@ -131,13 +145,23 @@ impl BrowserManager {
             Ok::<(), WebMcpError>(())
         };
         match tokio::time::timeout(dur, nav).await {
-            Ok(res) => res,
-            Err(_) => Err(WebError::Timeout(format!(
-                "navigation to {} exceeded {} ms",
-                url, self.config.nav_timeout_ms
-            ))
-            .into()),
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(WebError::Timeout(format!(
+                    "navigation to {} exceeded {} ms",
+                    url, self.config.nav_timeout_ms
+                ))
+                .into());
+            }
         }
+
+        // Re-apply the guard to wherever we actually landed (post-redirect).
+        if let Some(final_url) = page.url().await?
+            && final_url != url.as_str()
+        {
+            self.guard.check(&final_url).await?;
+        }
+        Ok(())
     }
 
     /// Navigate to `url` and extract its content.
