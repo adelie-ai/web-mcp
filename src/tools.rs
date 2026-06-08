@@ -15,6 +15,9 @@ use std::sync::Arc;
 const DEFAULT_SEARCH_COUNT: u64 = 8;
 /// Default cap on extracted page text, in characters.
 const DEFAULT_MAX_CHARS: u64 = 50_000;
+/// Request timeout for the search HTTP call. Bounds the worst case so a hung
+/// search backend can't stall a tool turn indefinitely.
+const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Tool registry: owns the HTTP client, browser manager, SSRF guard, and config
 /// and dispatches MCP tool calls.
@@ -36,8 +39,15 @@ impl ToolRegistry {
         let config = Arc::new(config);
         let guard = UrlGuard::new(config.allow_private_hosts);
         let browser = BrowserManager::new(Arc::clone(&config));
+        // A bounded-timeout client so a slow/hung search backend can't wedge a
+        // turn. `build` only fails if the TLS backend can't initialize; fall
+        // back to the default client in that (effectively impossible) case.
+        let client = reqwest::Client::builder()
+            .timeout(SEARCH_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         Self {
-            client: reqwest::Client::new(),
+            client,
             config,
             browser,
             guard,
@@ -49,7 +59,7 @@ impl ToolRegistry {
         serde_json::json!([
             {
                 "name": "web_search",
-                "description": "Search the web (via DuckDuckGo) and return ranked results as a list of {title, url, snippet}. Use this to discover relevant pages; follow up with web_read to fetch a result's content.",
+                "description": "Search the web and return ranked results as a list of {title, url, snippet}. Use this to discover relevant pages; follow up with web_read to fetch a result's content.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -114,13 +124,20 @@ impl ToolRegistry {
     }
 
     /// Execute a tool call by name with the given arguments.
+    ///
+    /// An unknown tool is a protocol fault and returns `Err` (the caller maps it
+    /// to a JSON-RPC error). A failure *within* a known tool (search returned
+    /// nothing, navigation timed out, URL blocked, bad arguments) is a tool
+    /// result with `isError: true` per the MCP spec — the model should see it as
+    /// tool output, not a transport error.
     pub async fn execute_tool(&self, tool_name: &str, arguments: &Value) -> Result<Value> {
-        match tool_name {
+        let outcome = match tool_name {
             "web_search" => self.execute_search(arguments).await,
             "web_read" => self.execute_read(arguments).await,
             "web_screenshot" => self.execute_screenshot(arguments).await,
-            _ => Err(McpError::ToolNotFound(tool_name.to_string()).into()),
-        }
+            _ => return Err(McpError::ToolNotFound(tool_name.to_string()).into()),
+        };
+        Ok(outcome.unwrap_or_else(|e| mcp_tool_error(&e.to_string())))
     }
 
     async fn execute_search(&self, args: &Value) -> Result<Value> {
@@ -189,10 +206,25 @@ fn get_u64(args: &Value, key: &str) -> Option<u64> {
         .or_else(|| v.as_str()?.parse::<u64>().ok())
 }
 
-/// Wrap a JSON value in the MCP tool-result content envelope.
+/// Wrap a JSON value in the MCP tool-result envelope.
+///
+/// MCP's content union has no `json` member, so the payload is serialized into a
+/// `text` block (readable by every client) and also surfaced as
+/// `structuredContent` for clients that consume typed tool output.
 fn mcp_tool_result_json(value: Value) -> Value {
+    let text = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
     serde_json::json!({
-        "content": [ { "type": "json", "value": value } ]
+        "content": [ { "type": "text", "text": text } ],
+        "structuredContent": value,
+    })
+}
+
+/// Build a failed tool-result (`isError: true`) carrying the error text. Tool
+/// execution failures are reported this way rather than as JSON-RPC errors.
+fn mcp_tool_error(message: &str) -> Value {
+    serde_json::json!({
+        "content": [ { "type": "text", "text": message } ],
+        "isError": true,
     })
 }
 
@@ -240,5 +272,68 @@ mod tests {
         assert_eq!(entry["type"], json!("image"));
         assert_eq!(entry["mimeType"], json!("image/png"));
         assert_eq!(entry["data"], json!("iVBORw=="));
+    }
+
+    #[test]
+    fn json_envelope_uses_text_content_and_structured() {
+        let payload = json!({ "a": 1, "b": ["x", "y"] });
+        let env = mcp_tool_result_json(payload.clone());
+        let entry = &env["content"][0];
+        // Standard MCP content type, not the bespoke "json".
+        assert_eq!(entry["type"], json!("text"));
+        let text = entry["text"].as_str().expect("text content");
+        assert_eq!(
+            serde_json::from_str::<Value>(text).expect("text is valid json"),
+            payload
+        );
+        // Typed clients get the structured form.
+        assert_eq!(env["structuredContent"], payload);
+        assert!(env.get("isError").is_none());
+    }
+
+    #[test]
+    fn error_envelope_sets_is_error_flag() {
+        let env = mcp_tool_error("navigation timed out");
+        assert_eq!(env["isError"], json!(true));
+        assert_eq!(env["content"][0]["type"], json!("text"));
+        assert_eq!(env["content"][0]["text"], json!("navigation timed out"));
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_protocol_error() {
+        let reg = ToolRegistry::new();
+        let res = reg.execute_tool("does_not_exist", &json!({})).await;
+        assert!(res.is_err(), "unknown tool must surface as Err (JSON-RPC)");
+    }
+
+    #[tokio::test]
+    async fn blocked_url_is_tool_error_result_not_err() {
+        // A guard-blocked URL is a tool-level failure: execute_tool returns Ok
+        // with an isError result, never an Err. No browser/network is reached
+        // because the guard refuses localhost before any launch.
+        let reg = ToolRegistry::new();
+        let res = reg
+            .execute_tool("web_read", &json!({ "url": "http://127.0.0.1/" }))
+            .await
+            .expect("blocked URL is a tool result, not a protocol error");
+        assert_eq!(res["isError"], json!(true));
+        let text = res["content"][0]["text"]
+            .as_str()
+            .expect("error text")
+            .to_lowercase();
+        assert!(
+            text.contains("private") || text.contains("refused"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_required_param_is_tool_error_result() {
+        let reg = ToolRegistry::new();
+        let res = reg
+            .execute_tool("web_read", &json!({}))
+            .await
+            .expect("missing param is a tool result");
+        assert_eq!(res["isError"], json!(true));
     }
 }

@@ -14,11 +14,17 @@
 
 use crate::config::WebConfig;
 use crate::error::{Result, WebError};
+use futures_util::StreamExt;
 use scraper::{Html, Selector};
 use serde_json::{Value, json};
 
 /// Upper bound on results we return in one call.
 const MAX_COUNT: usize = 25;
+
+/// Upper bound on the search response body we buffer and parse, in bytes. A
+/// results page is well under this; the cap stops a hostile/misconfigured
+/// endpoint from streaming an unbounded body into memory. 8 MiB is generous.
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Run a search and return up to `count` results as `{title, url, snippet}`.
 pub async fn search(
@@ -42,13 +48,36 @@ pub async fn search(
             WebError::SearchFailed(format!("search backend returned HTTP {}", status)).into(),
         );
     }
-    let body = resp.text().await?;
+    let body = read_body_capped(resp, MAX_BODY_BYTES).await?;
 
     let results = parse_results(&body, count);
     if results.is_empty() {
         return Err(WebError::SearchFailed(format!("no results for query: {}", query)).into());
     }
     Ok(Value::Array(results))
+}
+
+/// Read a response body as UTF-8, refusing once `max_bytes` is exceeded.
+///
+/// Why stream rather than `resp.text()`: `text()` buffers the entire body with
+/// no ceiling, so a hostile or misconfigured endpoint could exhaust memory.
+async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<String> {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        if buf.len() + chunk.len() > max_bytes {
+            return Err(WebError::SearchFailed(format!(
+                "search response exceeded {} bytes",
+                max_bytes
+            ))
+            .into());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    String::from_utf8(buf).map_err(|e| {
+        WebError::SearchFailed(format!("search response was not valid UTF-8: {e}")).into()
+    })
 }
 
 /// Parse the Mojeek HTML results page into result objects. Pure and

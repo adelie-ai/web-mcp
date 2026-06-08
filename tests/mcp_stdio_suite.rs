@@ -110,20 +110,56 @@ impl Drop for McpStdioClient {
     }
 }
 
-/// Extract the `value` field from the first `type: json` content entry.
+/// Extract the structured payload from a successful tool result.
+///
+/// Prefers `structuredContent`; falls back to parsing the first `text` content
+/// entry as JSON. (The payload is carried as a `text` block per MCP, with a
+/// `structuredContent` mirror for typed clients.)
 fn extract_json(tool_result: &Value) -> Value {
+    assert_ne!(
+        tool_result.get("isError"),
+        Some(&Value::Bool(true)),
+        "expected a successful tool result, got isError: {tool_result}"
+    );
+    if let Some(structured) = tool_result.get("structuredContent") {
+        return structured.clone();
+    }
     let content = tool_result
         .get("content")
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| panic!("expected result.content array, got: {tool_result}"));
     for entry in content {
-        if entry.get("type") == Some(&Value::String("json".to_string()))
-            && let Some(v) = entry.get("value")
+        if entry.get("type") == Some(&Value::String("text".to_string()))
+            && let Some(text) = entry.get("text").and_then(|v| v.as_str())
+            && let Ok(v) = serde_json::from_str::<Value>(text)
         {
-            return v.clone();
+            return v;
         }
     }
-    panic!("no json content entry in: {tool_result}");
+    panic!("no parseable text content entry in: {tool_result}");
+}
+
+/// Assert a tool result is a failure (`isError: true`) whose text contains
+/// `needle` (case-insensitive). Tool-execution failures (bad params, blocked
+/// URL, navigation error) are reported as `isError` results, not JSON-RPC
+/// errors.
+fn expect_tool_error_contains(result: &Value, needle: &str) {
+    assert_eq!(
+        result.get("isError"),
+        Some(&Value::Bool(true)),
+        "expected isError result, got: {result}"
+    );
+    let text = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|c| c.first())
+        .and_then(|e| e.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    assert!(
+        text.to_lowercase().contains(&needle.to_lowercase()),
+        "expected error text containing '{needle}', got: {text}"
+    );
 }
 
 fn network_tests_enabled() -> bool {
@@ -203,29 +239,34 @@ fn test_unknown_tool_returns_error() {
 }
 
 // ── Parameter validation / guard tests (no network) ──────────────────────────
+//
+// These are tool-execution failures: per the MCP spec they come back as a
+// successful tools/call result carrying `isError: true`, not a JSON-RPC error.
 
 #[test]
 fn test_search_missing_query() {
     let mut client = McpStdioClient::start();
     client.initialize();
-    expect_err_contains(client.tool_call("web_search", json!({})), "query");
+    let res = client.tool_call("web_search", json!({})).expect("result");
+    expect_tool_error_contains(&res, "query");
 }
 
 #[test]
 fn test_read_missing_url() {
     let mut client = McpStdioClient::start();
     client.initialize();
-    expect_err_contains(client.tool_call("web_read", json!({})), "url");
+    let res = client.tool_call("web_read", json!({})).expect("result");
+    expect_tool_error_contains(&res, "url");
 }
 
 #[test]
 fn test_read_rejects_non_http_scheme() {
     let mut client = McpStdioClient::start();
     client.initialize();
-    expect_err_contains(
-        client.tool_call("web_read", json!({"url": "file:///etc/passwd"})),
-        "scheme",
-    );
+    let res = client
+        .tool_call("web_read", json!({"url": "file:///etc/passwd"}))
+        .expect("result");
+    expect_tool_error_contains(&res, "scheme");
 }
 
 #[test]
@@ -233,27 +274,27 @@ fn test_read_blocks_loopback_ssrf() {
     let mut client = McpStdioClient::start();
     client.initialize();
     // Guard must refuse before any browser launch — this returns fast.
-    expect_err_contains(
-        client.tool_call(
+    let res = client
+        .tool_call(
             "web_read",
             json!({"url": "http://169.254.169.254/latest/meta-data/"}),
-        ),
-        "private",
-    );
-    expect_err_contains(
-        client.tool_call("web_read", json!({"url": "http://localhost:8080/"})),
-        "local",
-    );
+        )
+        .expect("result");
+    expect_tool_error_contains(&res, "private");
+    let res = client
+        .tool_call("web_read", json!({"url": "http://localhost:8080/"}))
+        .expect("result");
+    expect_tool_error_contains(&res, "local");
 }
 
 #[test]
 fn test_screenshot_blocks_loopback_ssrf() {
     let mut client = McpStdioClient::start();
     client.initialize();
-    expect_err_contains(
-        client.tool_call("web_screenshot", json!({"url": "http://127.0.0.1/"})),
-        "private",
-    );
+    let res = client
+        .tool_call("web_screenshot", json!({"url": "http://127.0.0.1/"}))
+        .expect("result");
+    expect_tool_error_contains(&res, "private");
 }
 
 // ── Network integration tests (require RUN_NETWORK_TESTS=1) ──────────────────
