@@ -3,6 +3,14 @@
 use crate::error::{Result, TransportError};
 use tokio::io::{self, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Stdin, Stdout};
 
+/// Upper bound on a single `Content-Length`-framed message, in bytes.
+///
+/// Why: the body length is peer-supplied and we allocate it up front, so an
+/// unbounded value (`Content-Length: 999999999999`) would let a peer trigger a
+/// multi-GB allocation and OOM the process. 16 MiB is far larger than any
+/// legitimate JSON-RPC message yet small enough to refuse before allocating.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StdioFraming {
     /// Detect framing based on the first successfully read message.
@@ -25,6 +33,25 @@ fn parse_content_length_header(line: &str) -> Option<usize> {
     }
     let value = value.trim();
     value.parse::<usize>().ok()
+}
+
+/// Parse a `Content-Length` header and enforce [`MAX_MESSAGE_BYTES`].
+///
+/// Returns the validated body length, or a [`TransportError::InvalidMessage`]
+/// when the header is absent/malformed or the length exceeds the cap. The cap
+/// is enforced *before* any buffer of that size is allocated, so a hostile
+/// `Content-Length` cannot trigger an out-of-memory allocation.
+fn checked_content_length(first: &str) -> std::result::Result<usize, TransportError> {
+    let content_length = parse_content_length_header(first).ok_or_else(|| {
+        TransportError::InvalidMessage(format!("Expected Content-Length header, got: {}", first))
+    })?;
+    if content_length > MAX_MESSAGE_BYTES {
+        return Err(TransportError::InvalidMessage(format!(
+            "Content-Length {} exceeds maximum of {} bytes",
+            content_length, MAX_MESSAGE_BYTES
+        )));
+    }
+    Ok(content_length)
 }
 
 /// STDIN/STDOUT transport for MCP
@@ -153,12 +180,8 @@ impl StdioTransportHandler {
     }
 
     async fn read_message_content_length_with_first_line(&mut self, first: &str) -> Result<String> {
-        let content_length = parse_content_length_header(first).ok_or_else(|| {
-            TransportError::InvalidMessage(format!(
-                "Expected Content-Length header, got: {}",
-                first
-            ))
-        })?;
+        // Parses and bounds the length before we allocate (OOM guard).
+        let content_length = checked_content_length(first)?;
 
         loop {
             let mut header_line = String::new();
@@ -186,5 +209,43 @@ impl StdioTransportHandler {
             TransportError::InvalidMessage(format!("Invalid UTF-8 in JSON-RPC message: {}", e))
         })?;
         Ok(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_content_length_accepts_normal_frame() {
+        assert_eq!(
+            checked_content_length("Content-Length: 42").expect("within cap"),
+            42
+        );
+        // At the cap exactly is allowed.
+        let at_cap = format!("Content-Length: {}", MAX_MESSAGE_BYTES);
+        assert_eq!(
+            checked_content_length(&at_cap).expect("at cap"),
+            MAX_MESSAGE_BYTES
+        );
+    }
+
+    #[test]
+    fn checked_content_length_rejects_oversized_frame() {
+        // A hostile length must be refused *before* any buffer is allocated.
+        let huge = format!("Content-Length: {}", MAX_MESSAGE_BYTES + 1);
+        let err = checked_content_length(&huge).expect_err("over cap must error");
+        assert!(
+            matches!(err, TransportError::InvalidMessage(_)),
+            "expected InvalidMessage, got {err:?}"
+        );
+
+        let absurd = "Content-Length: 999999999999";
+        assert!(checked_content_length(absurd).is_err());
+    }
+
+    #[test]
+    fn checked_content_length_rejects_missing_header() {
+        assert!(checked_content_length("Not-A-Header: 5").is_err());
     }
 }
