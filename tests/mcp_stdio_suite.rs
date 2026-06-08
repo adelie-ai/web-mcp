@@ -205,37 +205,51 @@ fn test_tools_list_contains_expected_tools() {
     let mut client = McpStdioClient::start();
     client.initialize();
     let resp = client.call("tools/list", json!({})).expect("tools/list");
+    // mcp-core returns `tools` as a flat array of tool objects.
     let tools = resp["result"]["tools"].as_array().expect("tools array");
-    let names: Vec<&str> = if tools.len() == 1 && tools[0].is_array() {
-        tools[0]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
-            .collect()
-    } else {
-        tools
-            .iter()
-            .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
-            .collect()
-    };
+    let names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+        .collect();
     for expected in ["web_search", "web_read", "web_screenshot"] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
 }
 
 #[test]
-fn test_tool_call_before_initialize_returns_error() {
+fn test_initialize_has_no_top_level_tools_key() {
+    // mcp-core advertises tools via tools/list, not the initialize result; the
+    // initialize result must not leak a non-standard top-level `tools` key.
     let mut client = McpStdioClient::start();
-    let result = client.tool_call("web_search", json!({"query": "rust"}));
-    assert!(result.is_err());
+    let resp = client
+        .call(
+            "initialize",
+            json!({"protocolVersion":"2025-06-18","capabilities":{}}),
+        )
+        .expect("initialize");
+    assert!(
+        resp["result"].get("tools").is_none(),
+        "initialize must not embed a top-level tools key: {resp}"
+    );
 }
 
 #[test]
-fn test_unknown_tool_returns_error() {
+fn test_tool_call_before_initialize_returns_error() {
+    // tools/call before the initialize handshake is a protocol fault, surfaced
+    // by mcp-core as a JSON-RPC "not initialized" error (not an isError result).
+    let mut client = McpStdioClient::start();
+    let result = client.tool_call("web_search", json!({"query": "rust"}));
+    expect_err_contains(result, "not initialized");
+}
+
+#[test]
+fn test_unknown_tool_is_tool_error_result() {
+    // Per the MCP spec (and mcp-core), an unknown tool name is a tool-level
+    // failure surfaced as an `isError: true` result, not a JSON-RPC error.
     let mut client = McpStdioClient::start();
     client.initialize();
-    expect_err_contains(client.tool_call("nope", json!({})), "not found");
+    let res = client.tool_call("nope", json!({})).expect("result");
+    expect_tool_error_contains(&res, "not found");
 }
 
 // ── Parameter validation / guard tests (no network) ──────────────────────────

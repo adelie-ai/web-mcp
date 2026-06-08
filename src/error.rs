@@ -1,10 +1,15 @@
 #![deny(warnings)]
 
-// Error types for the web-mcp crate
+// Domain error types for the web-mcp crate.
+//
+// Protocol/transport concerns (JSON-RPC dispatch, framing, version negotiation)
+// now live in `mcp-core`; these errors describe only what can go wrong inside
+// the web operations (search, browse) and the SSRF guard. The service layer
+// maps them onto `mcp_core::CallError` / `ToolReply` at the boundary.
 
 use thiserror::Error;
 
-/// Main error type for the web-mcp application.
+/// Error type for the web operations (search / browse) and SSRF guard.
 #[derive(Error, Debug)]
 pub enum WebMcpError {
     /// Web operation errors (search / browse).
@@ -14,14 +19,6 @@ pub enum WebMcpError {
     /// JSON serialization/deserialization errors.
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-
-    /// MCP protocol errors.
-    #[error("MCP protocol error: {0}")]
-    Mcp(#[from] McpError),
-
-    /// Transport layer errors.
-    #[error("Transport error: {0}")]
-    Transport(#[from] TransportError),
 
     /// IO errors.
     #[error("IO error: {0}")]
@@ -61,46 +58,6 @@ pub enum WebError {
     /// An operation exceeded its time budget.
     #[error("Timed out: {0}")]
     Timeout(String),
-}
-
-/// MCP protocol errors.
-#[derive(Error, Debug)]
-pub enum McpError {
-    /// Invalid protocol version.
-    #[error("Unsupported protocol version: {0}")]
-    InvalidProtocolVersion(String),
-
-    /// Invalid JSON-RPC message.
-    #[error("Invalid JSON-RPC message: {0}")]
-    InvalidJsonRpc(String),
-
-    /// Tool not found.
-    #[error("Tool not found: {0}")]
-    ToolNotFound(String),
-
-    /// Invalid tool parameters.
-    #[error("Invalid tool parameters: {0}")]
-    InvalidToolParameters(String),
-}
-
-/// Transport layer errors.
-#[derive(Error, Debug)]
-pub enum TransportError {
-    /// WebSocket connection error.
-    #[error("WebSocket connection error: {0}")]
-    WebSocket(String),
-
-    /// Invalid message format.
-    #[error("Invalid message format: {0}")]
-    InvalidMessage(String),
-
-    /// Connection closed.
-    #[error("Connection closed")]
-    ConnectionClosed,
-
-    /// IO error in transport.
-    #[error("Transport IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Result type alias for convenience.
