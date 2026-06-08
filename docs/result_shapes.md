@@ -1,15 +1,24 @@
 # web-mcp Result Shapes
 
-Search and read tools return their payload as a single `type: "json"` content
-entry; screenshots return a `type: "image"` entry:
+Search and read tools return their JSON payload as a single `type: "text"`
+content entry (the payload serialized to a string) plus a `structuredContent`
+mirror for typed clients; screenshots return a `type: "image"` entry:
 
 ```json
-{ "content": [ { "type": "json",  "value": <payload> } ] }
+{ "content": [ { "type": "text",  "text": "<json string>" } ], "structuredContent": <payload> }
 { "content": [ { "type": "image", "data": "<base64 png>", "mimeType": "image/png" } ] }
 ```
 
-On failure (no results, blocked URL, navigation error, bad parameters) the tool
-returns a JSON-RPC error instead of a result.
+On a tool-execution failure (no results, blocked URL, navigation error, bad
+parameters) the tool returns a **successful** `tools/call` result with
+`isError: true` and the message in a `text` content entry:
+
+```json
+{ "content": [ { "type": "text", "text": "<error message>" } ], "isError": true }
+```
+
+Protocol-level faults (unknown tool, server not initialized, malformed
+request) are still reported as JSON-RPC errors.
 
 ## `web_search` → array of Result
 
