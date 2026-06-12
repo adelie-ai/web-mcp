@@ -1,15 +1,20 @@
 #![deny(warnings)]
 
-// The `McpService` implementation: web_search / web_read / web_screenshot.
+// The `McpService` implementation: web_read / web_screenshot.
 //
 // mcp-core owns the JSON-RPC protocol, framing, version negotiation, and the
-// `serve` CLI. This module only describes the three tools and executes them,
-// holding the long-lived state (HTTP client, headless-Chrome handle, SSRF
-// guard, config) that the tools need.
+// `serve` CLI. This module only describes the tools and executes them, holding
+// the long-lived state (headless-Chrome handle, SSRF guard) that the tools need.
+//
+// There is intentionally no `web_search`: every keyless search-engine results
+// page blocks automated/datacenter access (403 / CAPTCHA / "anomaly" challenge)
+// even through the real headless browser, so a `web_search` tool here would
+// always fail. Discovery is instead done by pointing `web_read` at a search
+// engine's results URL — see the `web_read` tool description.
 
 use crate::config::WebConfig;
 use crate::error::{WebError, WebMcpError};
-use crate::operations::{browser::BrowserManager, search};
+use crate::operations::browser::BrowserManager;
 use crate::url_guard::UrlGuard;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -17,19 +22,13 @@ use mcp_core::{CallError, Content, McpService, ToolDef, ToolReply, async_trait};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-/// Default number of search results.
-const DEFAULT_SEARCH_COUNT: u64 = 8;
 /// Default cap on extracted page text, in characters.
 const DEFAULT_MAX_CHARS: u64 = 50_000;
-/// Request timeout for the search HTTP call. Bounds the worst case so a hung
-/// search backend can't stall a tool turn indefinitely.
-const SEARCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// The web-mcp service: owns the HTTP client, browser manager, SSRF guard, and
-/// config, and implements [`McpService`] for mcp-core to dispatch against.
+/// The web-mcp service: owns the browser manager and SSRF guard, and implements
+/// [`McpService`] for mcp-core to dispatch against. All web access goes through
+/// the headless browser.
 pub struct WebService {
-    client: reqwest::Client,
-    config: Arc<WebConfig>,
     browser: BrowserManager,
     guard: UrlGuard,
 }
@@ -45,27 +44,7 @@ impl WebService {
         let config = Arc::new(config);
         let guard = UrlGuard::new(config.allow_private_hosts);
         let browser = BrowserManager::new(Arc::clone(&config));
-        // A bounded-timeout client so a slow/hung search backend can't wedge a
-        // turn. `build` only fails if the TLS backend can't initialize; fall
-        // back to the default client in that (effectively impossible) case.
-        let client = reqwest::Client::builder()
-            .timeout(SEARCH_TIMEOUT)
-            .build()
-            .unwrap_or_default();
-        Self {
-            client,
-            config,
-            browser,
-            guard,
-        }
-    }
-
-    async fn execute_search(&self, args: &Value) -> Result<ToolReply, WebMcpError> {
-        let query = require_str(args, "query")?;
-        let count = get_u64(args, "count").unwrap_or(DEFAULT_SEARCH_COUNT) as usize;
-
-        let result = search::search(&self.client, &self.config, query, count).await?;
-        Ok(ToolReply::json(&result)?)
+        Self { browser, guard }
     }
 
     async fn execute_read(&self, args: &Value) -> Result<ToolReply, WebMcpError> {
@@ -103,32 +82,14 @@ impl McpService for WebService {
     fn tools(&self) -> Vec<ToolDef> {
         vec![
             ToolDef::new(
-                "web_search",
-                "Search the web and return ranked results as a list of {title, url, snippet}. Use this to discover relevant pages; follow up with web_read to fetch a result's content.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The search query. Plain keywords work best, e.g. 'rust async runtime comparison'."
-                        },
-                        "count": {
-                            "type": "number",
-                            "description": "Maximum number of results to return. Range: 1-25 (default: 8)."
-                        }
-                    },
-                    "required": ["query"]
-                }),
-            ),
-            ToolDef::new(
                 "web_read",
-                "Open a URL in a headless browser (full JavaScript rendering) and return the page's content. Use 'text' format for the rendered, human-readable text (best for reading/summarizing) or 'html' for the raw rendered DOM. Optionally include the page's outbound links. Refuses non-http(s) URLs and, by default, private/loopback/link-local hosts.",
+                "Open a URL in a headless browser (full JavaScript rendering) and return the page's content. Use 'text' format for the rendered, human-readable text (best for reading/summarizing) or 'html' for the raw rendered DOM. Set include_links=true to get the page's outbound links as {href, text}.\n\nDISCOVERY (there is no separate search tool): to find pages, point this tool at a search engine's results URL with include_links=true, then read the page's text and follow the relevant result links. Build the URL by URL-encoding your query (spaces as '+'), e.g. 'https://www.bing.com/search?q=YOUR+QUERY' or 'https://duckduckgo.com/html/?q=YOUR+QUERY'. If one engine returns a bot-challenge / few links (some block automated access), try another engine or read the result page's visible text for leads, then web_read the destination URLs you find. Prefer navigating directly to a known authoritative URL when you already know one.\n\nRefuses non-http(s) URLs and, by default, private/loopback/link-local hosts.",
                 json!({
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
-                            "description": "The absolute http(s) URL to open. Example: 'https://example.com/article'."
+                            "description": "The absolute http(s) URL to open. To read an article: 'https://example.com/article'. To search: a results URL like 'https://duckduckgo.com/html/?q=rust+async+runtime' (then use include_links to harvest result links)."
                         },
                         "format": {
                             "type": "string",
@@ -137,7 +98,7 @@ impl McpService for WebService {
                         },
                         "include_links": {
                             "type": "boolean",
-                            "description": "If true, also return the page's outbound links as {href, text}. Default: false."
+                            "description": "If true, also return the page's outbound links as {href, text}. Default: false. Set this when reading a search-engine results page so you can follow the result links."
                         },
                         "max_chars": {
                             "type": "number",
@@ -170,14 +131,13 @@ impl McpService for WebService {
 
     /// Execute a tool call.
     ///
-    /// Bad arguments, a guard-blocked URL, an empty search, or a navigation
-    /// failure are tool-level failures: they come back as `CallError::Tool`,
-    /// which mcp-core surfaces as `isError: true` content the model can react
-    /// to — not as a JSON-RPC protocol error. An unknown tool name is likewise
-    /// a `CallError::Tool` per the MCP spec.
+    /// Bad arguments, a guard-blocked URL, or a navigation failure are
+    /// tool-level failures: they come back as `CallError::Tool`, which mcp-core
+    /// surfaces as `isError: true` content the model can react to — not as a
+    /// JSON-RPC protocol error. An unknown tool name is likewise a
+    /// `CallError::Tool` per the MCP spec.
     async fn call_tool(&self, name: &str, arguments: &Value) -> Result<ToolReply, CallError> {
         let outcome = match name {
-            "web_search" => self.execute_search(arguments).await,
             "web_read" => self.execute_read(arguments).await,
             "web_screenshot" => self.execute_screenshot(arguments).await,
             other => return Err(CallError::tool(format!("Tool not found: {other}"))),
@@ -239,15 +199,21 @@ mod tests {
     }
 
     #[test]
-    fn tools_exposes_three_tools() {
+    fn tools_exposes_browser_tools_and_no_search() {
         let names: Vec<String> = WebService::new()
             .tools()
             .into_iter()
             .map(|t| t.name)
             .collect();
-        for expected in ["web_search", "web_read", "web_screenshot"] {
+        for expected in ["web_read", "web_screenshot"] {
             assert!(names.iter().any(|n| n == expected), "missing {expected}");
         }
+        // web_search was removed: keyless results pages all block automation, so
+        // a search tool here would always fail. Discovery goes via web_read.
+        assert!(
+            !names.iter().any(|n| n == "web_search"),
+            "web_search must not be exposed"
+        );
     }
 
     #[test]

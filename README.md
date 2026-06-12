@@ -1,9 +1,8 @@
 # web-mcp
 
-A small, fast Rust **MCP server** (plus library) that gives **LLM agents** two
-web capabilities behind one tool surface:
+A small, fast Rust **MCP server** (plus library) that gives **LLM agents**
+read-only web access behind a small tool surface:
 
-- **Web search** — a keyless query → ranked `{title, url, snippet}` results.
 - **Read-only browsing** — open a URL in **headless Chrome** (full JavaScript
   rendering, via the Chrome DevTools Protocol), and return the rendered text,
   the page's links, or a PNG screenshot.
@@ -14,13 +13,25 @@ No API keys are required.
 
 | Tool | Purpose |
 | --- | --- |
-| `web_search` | Search the web and return ranked results (`title`, `url`, `snippet`). |
 | `web_read` | Open a URL in headless Chrome and return rendered `text` (default) or `html`, optionally with the page's outbound links. Content is character-capped (`max_chars`, default 50k) with a `truncated` flag. |
 | `web_screenshot` | Open a URL in headless Chrome and return a PNG screenshot (viewport or `full_page`) as an MCP image. |
 
-Search and read results are returned as a `type: "json"` content entry;
-screenshots as a `type: "image"` (base64 PNG). See
+Read results are returned as a `type: "json"` content entry; screenshots as a
+`type: "image"` (base64 PNG). See
 [`docs/result_shapes.md`](docs/result_shapes.md).
+
+### No `web_search` tool — discovery via `web_read`
+
+This server intentionally exposes **no** `web_search` tool. Every keyless
+search-engine results page (Mojeek, DuckDuckGo, Brave, Ecosia, public SearXNG,
+…) blocks automated/datacenter access with a `403`, a CAPTCHA, or an "anomaly"
+challenge — *even when fetched through the real headless browser* — so a
+built-in search tool would fail unpredictably depending on the host's IP
+reputation. Rather than ship a tool that often errors, discovery is done with
+`web_read` itself: point it at a search engine's results URL (e.g.
+`https://www.bing.com/search?q=YOUR+QUERY` or
+`https://duckduckgo.com/html/?q=YOUR+QUERY`) with `include_links=true`, then
+follow the result links. The `web_read` tool description tells the model how.
 
 ## Safety: SSRF guard
 
@@ -34,15 +45,6 @@ risk. Before navigating, `web_read`/`web_screenshot`:
 
 This is on by default. `--allow-private-hosts` (env `WEB_ALLOW_PRIVATE_HOSTS`)
 disables it for trusted/offline use.
-
-## Search backend
-
-The default backend is **[Mojeek](https://www.mojeek.com/)** — an independent
-search engine (its own crawler) with a stable, server-renderable HTML results
-page and no key requirement. It was chosen over DuckDuckGo's HTML endpoint,
-which serves an "anomaly" bot-challenge to automated/non-residential clients.
-The endpoint is configurable (`--search-url`), though the HTML parser is
-Mojeek-specific.
 
 ## Build & run
 
@@ -63,8 +65,6 @@ cargo build --release
 
 | Flag | Env var | Default |
 | --- | --- | --- |
-| `--search-url` | `WEB_SEARCH_URL` | `https://www.mojeek.com/search` |
-| `--user-agent` | `WEB_USER_AGENT` | a desktop Chrome UA |
 | `--chrome-path` | `WEB_CHROME_PATH` | auto-detected |
 | `--chrome-arg` (repeatable) | — | none (e.g. `--chrome-arg=--no-sandbox`) |
 | `--allow-private-hosts` | `WEB_ALLOW_PRIVATE_HOSTS` | `false` |
@@ -76,15 +76,13 @@ automatically if it dies.
 
 ## Architecture
 
-Mirrors the sibling MCP servers in this monorepo (`fileio-mcp`, `geocode-mcp`,
-`openstreetmap-mcp`):
+Protocol/transport/CLI plumbing comes from the shared `mcp-core` crate; this
+crate supplies the web-specific pieces:
 
-- `src/main.rs` — CLI entrypoint, JSON-RPC loop, stdio + WebSocket transports.
-- `src/server.rs` — MCP lifecycle (`initialize` / `tools/list` / `tools/call`).
-- `src/tools.rs` — tool schemas, argument parsing, dispatch.
-- `src/config.rs` — search endpoint, UA, Chrome, and SSRF policy.
+- `src/main.rs` — CLI entrypoint; builds `WebConfig` and hands `mcp-core` a `WebService`.
+- `src/service.rs` — the `McpService` impl: tool schemas, argument parsing, dispatch.
+- `src/config.rs` — Chrome settings, navigation timeout, and SSRF policy.
 - `src/url_guard.rs` — the SSRF guard.
-- `src/operations/search.rs` — Mojeek HTML search.
 - `src/operations/browser.rs` — the persistent headless-Chrome manager.
 - `src/error.rs` — structured error types (`thiserror`).
 

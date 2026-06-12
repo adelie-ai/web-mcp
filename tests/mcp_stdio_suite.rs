@@ -211,9 +211,16 @@ fn test_tools_list_contains_expected_tools() {
         .iter()
         .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
         .collect();
-    for expected in ["web_search", "web_read", "web_screenshot"] {
+    for expected in ["web_read", "web_screenshot"] {
         assert!(names.contains(&expected), "missing {expected}: {names:?}");
     }
+    // web_search was removed (keyless results pages block automation even via
+    // the headless browser); discovery is done by pointing web_read at a
+    // search-engine results URL.
+    assert!(
+        !names.contains(&"web_search"),
+        "web_search must not be exposed: {names:?}"
+    );
 }
 
 #[test]
@@ -238,7 +245,7 @@ fn test_tool_call_before_initialize_returns_error() {
     // tools/call before the initialize handshake is a protocol fault, surfaced
     // by mcp-core as a JSON-RPC "not initialized" error (not an isError result).
     let mut client = McpStdioClient::start();
-    let result = client.tool_call("web_search", json!({"query": "rust"}));
+    let result = client.tool_call("web_read", json!({"url": "https://example.com"}));
     expect_err_contains(result, "not initialized");
 }
 
@@ -258,11 +265,14 @@ fn test_unknown_tool_is_tool_error_result() {
 // successful tools/call result carrying `isError: true`, not a JSON-RPC error.
 
 #[test]
-fn test_search_missing_query() {
+fn test_unknown_search_tool_is_tool_error() {
+    // web_search was removed; calling it is now an unknown-tool (isError) result.
     let mut client = McpStdioClient::start();
     client.initialize();
-    let res = client.tool_call("web_search", json!({})).expect("result");
-    expect_tool_error_contains(&res, "query");
+    let res = client
+        .tool_call("web_search", json!({"query": "rust"}))
+        .expect("result");
+    expect_tool_error_contains(&res, "not found");
 }
 
 #[test]
@@ -312,33 +322,10 @@ fn test_screenshot_blocks_loopback_ssrf() {
 }
 
 // ── Network integration tests (require RUN_NETWORK_TESTS=1) ──────────────────
-
-#[test]
-fn test_search_network() {
-    if !network_tests_enabled() {
-        eprintln!("Skipping network test (set RUN_NETWORK_TESTS=1 to enable)");
-        return;
-    }
-    let mut client = McpStdioClient::start();
-    client.initialize();
-    let result = client
-        .tool_call(
-            "web_search",
-            json!({"query": "rust programming language", "count": 5}),
-        )
-        .expect("web_search");
-    let arr = extract_json(&result);
-    let arr = arr.as_array().expect("array of results");
-    assert!(!arr.is_empty(), "expected search results");
-    assert!(arr[0].get("title").and_then(|v| v.as_str()).is_some());
-    assert!(
-        arr[0]
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .starts_with("http")
-    );
-}
+//
+// There is no search network test: `web_search` was removed because keyless
+// results pages block automated access. Discovery is exercised implicitly by
+// the web_read tests below (the model points web_read at a results URL).
 
 #[test]
 fn test_read_example_com_network() {
