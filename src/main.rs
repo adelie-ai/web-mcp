@@ -8,19 +8,13 @@
 
 use clap::Args;
 use mcp_core::{ServerConfig, TransportKind};
-use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, DEFAULT_SEARCH_URL, DEFAULT_USER_AGENT, WebConfig};
+use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, WebConfig};
 use web_mcp::service::WebService;
 
 /// web-mcp's own `serve` flags, flattened by mcp-core alongside its
 /// `CommonServeArgs` (transport/host/port/socket-path).
 #[derive(Args)]
 struct Local {
-    /// Search endpoint for web_search (a Mojeek-compatible HTML results URL).
-    #[arg(long, env = "WEB_SEARCH_URL", default_value = DEFAULT_SEARCH_URL)]
-    search_url: String,
-    /// User-Agent for outbound search requests.
-    #[arg(long, env = "WEB_USER_AGENT", default_value = DEFAULT_USER_AGENT)]
-    user_agent: String,
     /// Path to the Chrome/Chromium executable. When unset, a system install
     /// is auto-detected (google-chrome-stable, chromium, ...).
     #[arg(long, env = "WEB_CHROME_PATH")]
@@ -56,8 +50,6 @@ async fn main() -> mcp_core::Result<()> {
 
     mcp_core::run::<Local, _, _, _>(config, |local| async move {
         let web_config = WebConfig {
-            search_url: local.search_url,
-            user_agent: local.user_agent,
             chrome_executable: local.chrome_path,
             chrome_args: local.chrome_arg,
             allow_private_hosts: local.allow_private_hosts,

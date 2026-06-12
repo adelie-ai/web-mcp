@@ -1,17 +1,21 @@
 # web-mcp Result Shapes
 
-Search and read tools return their JSON payload as a single `type: "text"`
-content entry (the payload serialized to a string) plus a `structuredContent`
-mirror for typed clients; screenshots return a `type: "image"` entry:
+`web_read` returns its JSON payload as a single `type: "text"` content entry
+(the payload serialized to a string) plus a `structuredContent` mirror for typed
+clients; `web_screenshot` returns a `type: "image"` entry:
 
 ```json
 { "content": [ { "type": "text",  "text": "<json string>" } ], "structuredContent": <payload> }
 { "content": [ { "type": "image", "data": "<base64 png>", "mimeType": "image/png" } ] }
 ```
 
-On a tool-execution failure (no results, blocked URL, navigation error, bad
-parameters) the tool returns a **successful** `tools/call` result with
-`isError: true` and the message in a `text` content entry:
+> There is no `web_search` tool — keyless results pages block automated access
+> even via the headless browser, so discovery is done by pointing `web_read` at
+> a search-engine results URL with `include_links: true`. See the README.
+
+On a tool-execution failure (blocked URL, navigation error, bad parameters) the
+tool returns a **successful** `tools/call` result with `isError: true` and the
+message in a `text` content entry:
 
 ```json
 { "content": [ { "type": "text", "text": "<error message>" } ], "isError": true }
@@ -19,20 +23,6 @@ parameters) the tool returns a **successful** `tools/call` result with
 
 Protocol-level faults (unknown tool, server not initialized, malformed
 request) are still reported as JSON-RPC errors.
-
-## `web_search` → array of Result
-
-```json
-[
-  {
-    "title": "Rust Programming Language",
-    "url": "https://www.rust-lang.org/",
-    "snippet": "A language empowering everyone to build reliable and efficient software."
-  }
-]
-```
-
-Ordered by the search engine's relevance ranking. `snippet` may be `null`.
 
 ## `web_read` → Page
 
