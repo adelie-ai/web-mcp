@@ -33,6 +33,13 @@ use url::Url;
 /// directory, whose `SingletonLock` collides when more than one instance runs.
 static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// The full Chrome argument list for a launch: the always-on anti-automation
+/// flags first, then the operator's configured `chrome_args` (so config can add
+/// container flags like `--no-sandbox` or override behaviour).
+fn chrome_launch_args(user_args: &[String]) -> Vec<String> {
+    user_args.to_vec() // stub: the anti-automation defaults land in the impl commit
+}
+
 /// JS that collects every absolute http(s) link with its visible text.
 const LINKS_JS: &str = "Array.from(document.querySelectorAll('a[href]'))\
 .map(a => ({ href: a.href, text: (a.innerText || '').trim() }))\
@@ -92,8 +99,8 @@ impl BrowserManager {
         if let Some(exe) = &self.config.chrome_executable {
             builder = builder.chrome_executable(exe);
         }
-        for arg in &self.config.chrome_args {
-            builder = builder.arg(arg.as_str());
+        for arg in chrome_launch_args(&self.config.chrome_args) {
+            builder = builder.arg(arg);
         }
         let cfg = builder.build().map_err(WebError::Navigation)?;
 
@@ -290,5 +297,36 @@ mod tests {
         let (t, cut) = truncate("abc".to_string(), 100);
         assert!(!cut);
         assert_eq!(t, "abc");
+    }
+
+    const AUTOMATION_FLAG: &str = "--disable-blink-features=AutomationControlled";
+
+    #[test]
+    fn launch_args_always_disable_automation_control() {
+        // The flag that stops Chrome advertising navigator.webdriver is applied
+        // even with no operator args — that's what blunts the false-positive bot
+        // challenges (Cloudflare "suspicious activity").
+        let args = chrome_launch_args(&[]);
+        assert_eq!(args, vec![AUTOMATION_FLAG.to_string()]);
+    }
+
+    #[test]
+    fn launch_args_prepend_defaults_before_user_args() {
+        let user = vec![
+            "--no-sandbox".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+        ];
+        let args = chrome_launch_args(&user);
+        assert!(
+            args.contains(&AUTOMATION_FLAG.to_string()),
+            "anti-automation flag is present"
+        );
+        assert!(
+            args.contains(&"--no-sandbox".to_string()),
+            "operator container flags are preserved"
+        );
+        let auto = args.iter().position(|a| a == AUTOMATION_FLAG).unwrap();
+        let sandbox = args.iter().position(|a| a == "--no-sandbox").unwrap();
+        assert!(auto < sandbox, "defaults come before operator args");
     }
 }
