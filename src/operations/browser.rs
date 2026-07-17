@@ -33,6 +33,28 @@ use url::Url;
 /// directory, whose `SingletonLock` collides when more than one instance runs.
 static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Chrome flags web-mcp always applies to blunt the automation fingerprints that
+/// trip false-positive bot challenges (e.g. Cloudflare "suspicious activity from
+/// your network"). `--disable-blink-features=AutomationControlled` stops Chrome
+/// advertising `navigator.webdriver`; combined with `--headless=new` (which uses
+/// an ordinary Chrome user-agent, not "HeadlessChrome") the browser presents like
+/// a normal one. Why only this: it removes the obvious tells a real user's
+/// browser never shows — it is deliberately NOT an attempt to defeat TLS/JA3 or
+/// behavioural fingerprinting, which no flag can, and a determined bot-management
+/// challenge may still block.
+const ANTI_AUTOMATION_ARGS: &[&str] = &["--disable-blink-features=AutomationControlled"];
+
+/// The full Chrome argument list for a launch: the always-on anti-automation
+/// flags first, then the operator's configured `chrome_args` (so config can add
+/// container flags like `--no-sandbox` or override behaviour).
+fn chrome_launch_args(user_args: &[String]) -> Vec<String> {
+    ANTI_AUTOMATION_ARGS
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(user_args.iter().cloned())
+        .collect()
+}
+
 /// JS that collects every absolute http(s) link with its visible text.
 const LINKS_JS: &str = "Array.from(document.querySelectorAll('a[href]'))\
 .map(a => ({ href: a.href, text: (a.innerText || '').trim() }))\
@@ -92,8 +114,8 @@ impl BrowserManager {
         if let Some(exe) = &self.config.chrome_executable {
             builder = builder.chrome_executable(exe);
         }
-        for arg in &self.config.chrome_args {
-            builder = builder.arg(arg.as_str());
+        for arg in chrome_launch_args(&self.config.chrome_args) {
+            builder = builder.arg(arg);
         }
         let cfg = builder.build().map_err(WebError::Navigation)?;
 
@@ -290,5 +312,36 @@ mod tests {
         let (t, cut) = truncate("abc".to_string(), 100);
         assert!(!cut);
         assert_eq!(t, "abc");
+    }
+
+    const AUTOMATION_FLAG: &str = "--disable-blink-features=AutomationControlled";
+
+    #[test]
+    fn launch_args_always_disable_automation_control() {
+        // The flag that stops Chrome advertising navigator.webdriver is applied
+        // even with no operator args — that's what blunts the false-positive bot
+        // challenges (Cloudflare "suspicious activity").
+        let args = chrome_launch_args(&[]);
+        assert_eq!(args, vec![AUTOMATION_FLAG.to_string()]);
+    }
+
+    #[test]
+    fn launch_args_prepend_defaults_before_user_args() {
+        let user = vec![
+            "--no-sandbox".to_string(),
+            "--disable-dev-shm-usage".to_string(),
+        ];
+        let args = chrome_launch_args(&user);
+        assert!(
+            args.contains(&AUTOMATION_FLAG.to_string()),
+            "anti-automation flag is present"
+        );
+        assert!(
+            args.contains(&"--no-sandbox".to_string()),
+            "operator container flags are preserved"
+        );
+        let auto = args.iter().position(|a| a == AUTOMATION_FLAG).unwrap();
+        let sandbox = args.iter().position(|a| a == "--no-sandbox").unwrap();
+        assert!(auto < sandbox, "defaults come before operator args");
     }
 }

@@ -83,7 +83,7 @@ impl McpService for WebService {
         vec![
             ToolDef::new(
                 "web_read",
-                "Open a URL in a headless browser (full JavaScript rendering) and return the page's content. Use 'text' format for the rendered, human-readable text (best for reading/summarizing) or 'html' for the raw rendered DOM. Set include_links=true to get the page's outbound links as {href, text}.\n\nDISCOVERY (there is no separate search tool): to find pages, point this tool at a search engine's results URL with include_links=true, then read the page's text and follow the relevant result links. Build the URL by URL-encoding your query (spaces as '+'), e.g. 'https://www.bing.com/search?q=YOUR+QUERY' or 'https://duckduckgo.com/html/?q=YOUR+QUERY'. If one engine returns a bot-challenge / few links (some block automated access), try another engine or read the result page's visible text for leads, then web_read the destination URLs you find. Prefer navigating directly to a known authoritative URL when you already know one.\n\nRefuses non-http(s) URLs and, by default, private/loopback/link-local hosts.",
+                "Fetch and read any web page - the general-purpose tool for getting content off the internet. Opens an http(s) URL in a real headless browser (full JavaScript rendering) and returns the page's content. Reach for this whenever you need something from the web: news and current events, articles, blog posts, documentation and reference material, product or pricing pages, forum and discussion threads, or the live contents of any specific website or URL. It is also how you get up-to-date, real-time information the model would not otherwise know. Use 'text' format for the rendered, human-readable text (best for reading/summarizing) or 'html' for the raw rendered DOM. Set include_links=true to also get the page's outbound links as {href, text}.\n\nDISCOVERY (there is no separate search tool): to find pages, point this tool at a search engine's results URL with include_links=true, then read the page's text and follow the relevant result links. Build the URL by URL-encoding your query (spaces as '+'), e.g. 'https://www.bing.com/search?q=YOUR+QUERY' or 'https://duckduckgo.com/html/?q=YOUR+QUERY'. If one engine returns a bot-challenge / few links (some block automated access), try another engine or read the result page's visible text for leads, then web_read the destination URLs you find. Prefer navigating directly to a known authoritative URL when you already know one.\n\nRefuses non-http(s) URLs and, by default, private/loopback/link-local hosts.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -214,6 +214,25 @@ mod tests {
             !names.iter().any(|n| n == "web_search"),
             "web_search must not be exposed"
         );
+    }
+
+    #[test]
+    fn web_read_description_frames_general_web_fetching() {
+        // The model was forgetting web_read exists for miscellaneous fetches, so
+        // its description must present it as the general fetch-anything / news /
+        // current-info tool (these terms also drive tool-search recall).
+        let tools = WebService::new().tools();
+        let web_read = tools
+            .iter()
+            .find(|t| t.name == "web_read")
+            .expect("web_read is exposed");
+        let d = web_read.description.to_lowercase();
+        for term in ["any web page", "news", "up-to-date", "fetch"] {
+            assert!(
+                d.contains(term),
+                "web_read description should mention '{term}'"
+            );
+        }
     }
 
     #[test]
