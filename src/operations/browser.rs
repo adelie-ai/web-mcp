@@ -33,11 +33,26 @@ use url::Url;
 /// directory, whose `SingletonLock` collides when more than one instance runs.
 static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Chrome flags web-mcp always applies to blunt the automation fingerprints that
+/// trip false-positive bot challenges (e.g. Cloudflare "suspicious activity from
+/// your network"). `--disable-blink-features=AutomationControlled` stops Chrome
+/// advertising `navigator.webdriver`; combined with `--headless=new` (which uses
+/// an ordinary Chrome user-agent, not "HeadlessChrome") the browser presents like
+/// a normal one. Why only this: it removes the obvious tells a real user's
+/// browser never shows — it is deliberately NOT an attempt to defeat TLS/JA3 or
+/// behavioural fingerprinting, which no flag can, and a determined bot-management
+/// challenge may still block.
+const ANTI_AUTOMATION_ARGS: &[&str] = &["--disable-blink-features=AutomationControlled"];
+
 /// The full Chrome argument list for a launch: the always-on anti-automation
 /// flags first, then the operator's configured `chrome_args` (so config can add
 /// container flags like `--no-sandbox` or override behaviour).
 fn chrome_launch_args(user_args: &[String]) -> Vec<String> {
-    user_args.to_vec() // stub: the anti-automation defaults land in the impl commit
+    ANTI_AUTOMATION_ARGS
+        .iter()
+        .map(|s| (*s).to_string())
+        .chain(user_args.iter().cloned())
+        .collect()
 }
 
 /// JS that collects every absolute http(s) link with its visible text.
