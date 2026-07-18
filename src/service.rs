@@ -18,12 +18,28 @@ use crate::operations::browser::BrowserManager;
 use crate::url_guard::UrlGuard;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use mcp_core::{CallError, Content, McpService, ToolDef, ToolReply, async_trait};
+use mcp_core::{
+    CallError, Content, McpService, ServerConfig, ToolDef, ToolReply, TransportKind, async_trait,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Default cap on extracted page text, in characters.
 const DEFAULT_MAX_CHARS: u64 = 50_000;
+
+/// Build the [`ServerConfig`] for web-mcp: the server identity, the transports it
+/// is willing to serve, and its default transport.
+///
+/// Why here (not inline in `main`): keeping construction in the library makes the
+/// configuration - in particular that a non-empty model-facing `instructions`
+/// string is advertised on the MCP `initialize` response - unit-testable without
+/// spawning the binary.
+pub fn server_config() -> ServerConfig {
+    ServerConfig::new("web-mcp", env!("CARGO_PKG_VERSION"))
+        .without_websocket()
+        .with_unix()
+        .default_transport(TransportKind::Stdio)
+}
 
 /// The web-mcp service: owns the browser manager and SSRF guard, and implements
 /// [`McpService`] for mcp-core to dispatch against. All web access goes through
@@ -196,6 +212,48 @@ mod tests {
         assert!(require_str(&json!({ "url": "" }), "url").is_err());
         assert!(require_str(&json!({}), "url").is_err());
         assert_eq!(require_str(&json!({ "url": "x" }), "url").unwrap(), "x");
+    }
+
+    #[test]
+    fn server_config_advertises_instructions() {
+        // The daemon uses the MCP `instructions` string as this server's
+        // searchable, model-facing description, so the config must advertise a
+        // non-empty one. It should also name the key tools so server-level
+        // discovery points the model at the right entry points.
+        let cfg = server_config();
+        let instructions = cfg
+            .instructions
+            .expect("server_config advertises MCP instructions");
+        assert!(
+            !instructions.trim().is_empty(),
+            "instructions must be non-empty"
+        );
+        for tool in ["web_read", "web_screenshot"] {
+            assert!(
+                instructions.contains(tool),
+                "instructions should name {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_screenshot_description_leads_with_visual_purpose() {
+        // web_screenshot should lead with what it produces - a screenshot / PNG
+        // image of how a page looks (layout, visuals) - using the natural terms a
+        // model would search, not with browser mechanism. These terms also drive
+        // tool-search recall.
+        let tools = WebService::new().tools();
+        let shot = tools
+            .iter()
+            .find(|t| t.name == "web_screenshot")
+            .expect("web_screenshot is exposed");
+        let d = shot.description.to_lowercase();
+        for term in ["screenshot", "png", "image", "layout"] {
+            assert!(
+                d.contains(term),
+                "web_screenshot description should mention '{term}'"
+            );
+        }
     }
 
     #[test]

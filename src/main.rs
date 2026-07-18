@@ -7,9 +7,8 @@
 // a `WebService` to dispatch against.
 
 use clap::Args;
-use mcp_core::{ServerConfig, TransportKind};
 use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, WebConfig};
-use web_mcp::service::WebService;
+use web_mcp::service::{WebService, server_config};
 
 /// web-mcp's own `serve` flags, flattened by mcp-core alongside its
 /// `CommonServeArgs` (transport/host/port/socket-path).
@@ -42,11 +41,10 @@ struct Local {
 async fn main() -> mcp_core::Result<()> {
     // web-mcp speaks stdio in the live config and dropped its bespoke websocket
     // transport (mcp-core's is feature-gated and not enabled here), so only
-    // stdio and unix are offered. `--mode stdio` still works as an alias.
-    let config = ServerConfig::new("web-mcp", env!("CARGO_PKG_VERSION"))
-        .without_websocket()
-        .with_unix()
-        .default_transport(TransportKind::Stdio);
+    // stdio and unix are offered. `--mode stdio` still works as an alias. The
+    // config - identity, transports, and the model-facing `instructions` blurb -
+    // is built by `server_config` in the library so it stays unit-testable.
+    let config = server_config();
 
     mcp_core::run::<Local, _, _, _>(config, |local| async move {
         let web_config = WebConfig {
