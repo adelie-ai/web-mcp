@@ -27,8 +27,16 @@ use std::sync::Arc;
 /// Default cap on extracted page text, in characters.
 const DEFAULT_MAX_CHARS: u64 = 50_000;
 
+/// Model-facing description of this server, emitted as the MCP `initialize`
+/// `instructions` string. The daemon captures it as the server's searchable
+/// description, so it names what the server is for, when to reach for it, the key
+/// tools, and the two critical usage notes (there is no search tool - discover via
+/// a results URL; and the SSRF safety policy).
+pub const SERVER_INSTRUCTIONS: &str = "Live web access through a real headless browser (full JavaScript rendering) for fetching pages the model cannot otherwise see. Reach for this whenever you need current, real-time, or specific information from the internet - news and current events, articles and blog posts, documentation and reference material, product or pricing pages, forum threads, or the live contents of a known URL. Two tools: web_read returns a page as readable text or raw HTML (optionally harvesting its outbound links), and web_screenshot captures a page as a PNG image of how it actually looks. There is no separate search tool - to find pages, point web_read at a search engine's results URL (e.g. https://duckduckgo.com/html/?q=YOUR+QUERY) with include_links=true and follow the results; note that only http(s) URLs are accepted and private/loopback hosts are refused by default (SSRF guard).";
+
 /// Build the [`ServerConfig`] for web-mcp: the server identity, the transports it
-/// is willing to serve, and its default transport.
+/// is willing to serve, its default transport, and the model-facing
+/// [`SERVER_INSTRUCTIONS`] blurb.
 ///
 /// Why here (not inline in `main`): keeping construction in the library makes the
 /// configuration - in particular that a non-empty model-facing `instructions`
@@ -39,6 +47,7 @@ pub fn server_config() -> ServerConfig {
         .without_websocket()
         .with_unix()
         .default_transport(TransportKind::Stdio)
+        .instructions(SERVER_INSTRUCTIONS)
 }
 
 /// The web-mcp service: owns the browser manager and SSRF guard, and implements
@@ -126,7 +135,7 @@ impl McpService for WebService {
             ),
             ToolDef::new(
                 "web_screenshot",
-                "Open a URL in a headless browser and capture a PNG screenshot, returned as an image. Use to see how a page looks or to capture visual content that text extraction misses. Same URL safety rules as web_read.",
+                "Take a screenshot of a web page and return it as a PNG image. Reach for this when you need to see how a page actually looks - its layout, images, charts, maps, or other visual content that plain-text extraction (web_read) misses - rather than its text. Set full_page=true to capture the entire scrollable page instead of just the visible viewport. Same URL rules as web_read: http(s) only, and private/loopback hosts are refused by default.",
                 json!({
                     "type": "object",
                     "properties": {
