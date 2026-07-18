@@ -224,6 +224,31 @@ fn test_tools_list_contains_expected_tools() {
 }
 
 #[test]
+fn test_initialize_advertises_instructions() {
+    // The daemon captures the MCP `instructions` string as the server's
+    // searchable, model-facing description, so the initialize response must carry
+    // a non-empty one that names the server's tools.
+    let mut client = McpStdioClient::start();
+    let resp = client
+        .call(
+            "initialize",
+            json!({"protocolVersion":"2025-11-25","capabilities":{}}),
+        )
+        .expect("initialize");
+    let instructions = resp["result"]["instructions"]
+        .as_str()
+        .expect("initialize advertises a string instructions field");
+    assert!(
+        !instructions.trim().is_empty(),
+        "instructions must be non-empty: {resp}"
+    );
+    assert!(
+        instructions.contains("web_read") && instructions.contains("web_screenshot"),
+        "instructions should name the tools: {instructions}"
+    );
+}
+
+#[test]
 fn test_initialize_has_no_top_level_tools_key() {
     // mcp-core advertises tools via tools/list, not the initialize result; the
     // initialize result must not leak a non-standard top-level `tools` key.

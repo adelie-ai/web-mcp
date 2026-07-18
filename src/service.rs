@@ -18,12 +18,37 @@ use crate::operations::browser::BrowserManager;
 use crate::url_guard::UrlGuard;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use mcp_core::{CallError, Content, McpService, ToolDef, ToolReply, async_trait};
+use mcp_core::{
+    CallError, Content, McpService, ServerConfig, ToolDef, ToolReply, TransportKind, async_trait,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
 /// Default cap on extracted page text, in characters.
 const DEFAULT_MAX_CHARS: u64 = 50_000;
+
+/// Model-facing description of this server, emitted as the MCP `initialize`
+/// `instructions` string. The daemon captures it as the server's searchable
+/// description, so it names what the server is for, when to reach for it, the key
+/// tools, and the two critical usage notes (there is no search tool - discover via
+/// a results URL; and the SSRF safety policy).
+pub const SERVER_INSTRUCTIONS: &str = "Live web access through a real headless browser (full JavaScript rendering) for fetching pages the model cannot otherwise see. Reach for this whenever you need current, real-time, or specific information from the internet - news and current events, articles and blog posts, documentation and reference material, product or pricing pages, forum threads, or the live contents of a known URL. Two tools: web_read returns a page as readable text or raw HTML (optionally harvesting its outbound links), and web_screenshot captures a page as a PNG image of how it actually looks. There is no separate search tool - to find pages, point web_read at a search engine's results URL (e.g. https://duckduckgo.com/html/?q=YOUR+QUERY) with include_links=true and follow the results; note that only http(s) URLs are accepted and private/loopback hosts are refused by default (SSRF guard).";
+
+/// Build the [`ServerConfig`] for web-mcp: the server identity, the transports it
+/// is willing to serve, its default transport, and the model-facing
+/// [`SERVER_INSTRUCTIONS`] blurb.
+///
+/// Why here (not inline in `main`): keeping construction in the library makes the
+/// configuration - in particular that a non-empty model-facing `instructions`
+/// string is advertised on the MCP `initialize` response - unit-testable without
+/// spawning the binary.
+pub fn server_config() -> ServerConfig {
+    ServerConfig::new("web-mcp", env!("CARGO_PKG_VERSION"))
+        .without_websocket()
+        .with_unix()
+        .default_transport(TransportKind::Stdio)
+        .instructions(SERVER_INSTRUCTIONS)
+}
 
 /// The web-mcp service: owns the browser manager and SSRF guard, and implements
 /// [`McpService`] for mcp-core to dispatch against. All web access goes through
@@ -110,7 +135,7 @@ impl McpService for WebService {
             ),
             ToolDef::new(
                 "web_screenshot",
-                "Open a URL in a headless browser and capture a PNG screenshot, returned as an image. Use to see how a page looks or to capture visual content that text extraction misses. Same URL safety rules as web_read.",
+                "Take a screenshot of a web page and return it as a PNG image. Reach for this when you need to see how a page actually looks - its layout, images, charts, maps, or other visual content that plain-text extraction (web_read) misses - rather than its text. Set full_page=true to capture the entire scrollable page instead of just the visible viewport. Same URL rules as web_read: http(s) only, and private/loopback hosts are refused by default.",
                 json!({
                     "type": "object",
                     "properties": {
@@ -196,6 +221,48 @@ mod tests {
         assert!(require_str(&json!({ "url": "" }), "url").is_err());
         assert!(require_str(&json!({}), "url").is_err());
         assert_eq!(require_str(&json!({ "url": "x" }), "url").unwrap(), "x");
+    }
+
+    #[test]
+    fn server_config_advertises_instructions() {
+        // The daemon uses the MCP `instructions` string as this server's
+        // searchable, model-facing description, so the config must advertise a
+        // non-empty one. It should also name the key tools so server-level
+        // discovery points the model at the right entry points.
+        let cfg = server_config();
+        let instructions = cfg
+            .instructions
+            .expect("server_config advertises MCP instructions");
+        assert!(
+            !instructions.trim().is_empty(),
+            "instructions must be non-empty"
+        );
+        for tool in ["web_read", "web_screenshot"] {
+            assert!(
+                instructions.contains(tool),
+                "instructions should name {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn web_screenshot_description_leads_with_visual_purpose() {
+        // web_screenshot should lead with what it produces - a screenshot / PNG
+        // image of how a page looks (layout, visuals) - using the natural terms a
+        // model would search, not with browser mechanism. These terms also drive
+        // tool-search recall.
+        let tools = WebService::new().tools();
+        let shot = tools
+            .iter()
+            .find(|t| t.name == "web_screenshot")
+            .expect("web_screenshot is exposed");
+        let d = shot.description.to_lowercase();
+        for term in ["screenshot", "png", "image", "layout"] {
+            assert!(
+                d.contains(term),
+                "web_screenshot description should mention '{term}'"
+            );
+        }
     }
 
     #[test]
