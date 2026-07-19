@@ -8,7 +8,7 @@
 
 use clap::Args;
 use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, WebConfig};
-use web_mcp::service::{WebService, server_config};
+use web_mcp::{WebService, server_config};
 
 /// web-mcp's own `serve` flags, flattened by mcp-core alongside its
 /// `CommonServeArgs` (transport/host/port/socket-path).
@@ -47,6 +47,10 @@ async fn main() -> mcp_core::Result<()> {
     let config = server_config();
 
     mcp_core::run::<Local, _, _, _>(config, |local| async move {
+        // The zero-config default is `web_mcp::build_service()` (used for
+        // in-process hosting); the binary layers its serve flags/env onto the
+        // same `WebService::with_config` constructor, so both share one
+        // construction path with no default drift.
         let web_config = WebConfig {
             chrome_executable: local.chrome_path,
             chrome_args: local.chrome_arg,

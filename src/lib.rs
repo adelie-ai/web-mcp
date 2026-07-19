@@ -11,6 +11,28 @@ pub mod operations;
 pub mod service;
 pub mod url_guard;
 
+pub use service::{WebService, server_config};
+
+/// Construct the Service with built-in defaults for in-process hosting (da#538 Phase C).
+///
+/// Returns a [`WebService`] wired from
+/// [`WebConfig::default`](crate::config::WebConfig::default): the SSRF guard is
+/// on (private/loopback/link-local hosts are refused), the navigation timeout is
+/// the built-in default, no extra Chrome arguments are passed, and no explicit
+/// Chrome path is set - the executable is resolved lazily at first launch by
+/// chromiumoxide's auto-detection. This is exactly the behavior of `web-mcp
+/// serve` with no flags, and it touches no network, filesystem, or config, so
+/// construction is infallible: a client can host the server in-process with zero
+/// setup.
+///
+/// This is the zero-config entry into the single construction path,
+/// [`WebService::with_config`]; the standalone binary reuses that same
+/// constructor, layering its serve flags (`--chrome-path`, `--chrome-arg`,
+/// `--allow-private-hosts`, `--nav-timeout-ms`) on top.
+pub fn build_service() -> WebService {
+    WebService::new()
+}
+
 #[cfg(test)]
 mod build_service_tests {
     use super::*;
