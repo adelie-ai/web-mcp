@@ -160,6 +160,7 @@ impl BrowserManager {
     /// 3xx-redirects to an internal/metadata host must be caught here, after the
     /// fact, by re-checking `page.url()`.
     async fn navigate(&self, page: &Page, url: &Url) -> Result<()> {
+        log_navigation_start(url);
         let dur = Duration::from_millis(self.config.nav_timeout_ms);
         let nav = async {
             page.goto(url.as_str()).await?;
@@ -273,6 +274,19 @@ impl BrowserManager {
     }
 }
 
+/// Log that navigation to `url` is starting: web-mcp's one outbound network
+/// call, made through the browser rather than a direct HTTP client, so this
+/// is both "the outbound HTTP request" and "the browser navigation" the
+/// level contract asks a server to log.
+///
+/// A page URL is a tool argument — content, never an id — so it stays at
+/// DEBUG and is never attached to a span (a span field would leave the
+/// process with `otel` on regardless of level). Kept as its own function so
+/// a test can drive it directly, without a real browser or network.
+fn log_navigation_start(url: &Url) {
+    tracing::debug!(url = %url, "navigating");
+}
+
 /// Truncate `s` to at most `max_chars` characters (0 = unlimited). Returns the
 /// possibly-truncated string and whether truncation happened.
 fn truncate(s: String, max_chars: usize) -> (String, bool) {
@@ -312,6 +326,72 @@ mod tests {
         let (t, cut) = truncate("abc".to_string(), 100);
         assert!(!cut);
         assert_eq!(t, "abc");
+    }
+
+    #[test]
+    fn log_navigation_start_puts_the_url_at_debug_only() {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+
+        type LoggedEvent = (tracing::Level, BTreeMap<String, String>);
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<LoggedEvent>>>);
+
+        struct Collector<'a>(&'a mut BTreeMap<String, String>);
+        impl Visit for Collector<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut fields = BTreeMap::new();
+                event.record(&mut Collector(&mut fields));
+                self.0
+                    .lock()
+                    .expect("capture lock is only held to push one record")
+                    .push((*event.metadata().level(), fields));
+            }
+        }
+
+        let url: Url = "https://example.com/MARKER-log-nav-9f3d1c"
+            .parse()
+            .expect("a valid url");
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            log_navigation_start(&url);
+        });
+
+        let events = capture
+            .0
+            .lock()
+            .expect("capture lock is only held to push one record");
+        assert_eq!(
+            events.len(),
+            1,
+            "navigating must log exactly one event: {events:?}"
+        );
+        let (level, fields) = &events[0];
+        assert_eq!(
+            *level,
+            tracing::Level::DEBUG,
+            "navigation start must log at DEBUG, so it stays off the INFO band"
+        );
+        assert_eq!(
+            fields.get("url").map(String::as_str),
+            Some(url.as_str()),
+            "the event must carry the url that was navigated to"
+        );
     }
 
     const AUTOMATION_FLAG: &str = "--disable-blink-features=AutomationControlled";
