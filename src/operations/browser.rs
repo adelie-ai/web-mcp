@@ -160,6 +160,7 @@ impl BrowserManager {
     /// 3xx-redirects to an internal/metadata host must be caught here, after the
     /// fact, by re-checking `page.url()`.
     async fn navigate(&self, page: &Page, url: &Url) -> Result<()> {
+        log_navigation_start(url);
         let dur = Duration::from_millis(self.config.nav_timeout_ms);
         let nav = async {
             page.goto(url.as_str()).await?;
@@ -273,6 +274,19 @@ impl BrowserManager {
     }
 }
 
+/// Log that navigation to `url` is starting: web-mcp's one outbound network
+/// call, made through the browser rather than a direct HTTP client, so this
+/// is both "the outbound HTTP request" and "the browser navigation" the
+/// level contract asks a server to log.
+///
+/// A page URL is a tool argument — content, never an id — so it stays at
+/// DEBUG and is never attached to a span (a span field would leave the
+/// process with `otel` on regardless of level). Kept as its own function so
+/// a test can drive it directly, without a real browser or network.
+fn log_navigation_start(url: &Url) {
+    tracing::debug!(url = %url, "navigating");
+}
+
 /// Truncate `s` to at most `max_chars` characters (0 = unlimited). Returns the
 /// possibly-truncated string and whether truncation happened.
 fn truncate(s: String, max_chars: usize) -> (String, bool) {
@@ -322,8 +336,10 @@ mod tests {
         use tracing_subscriber::Layer;
         use tracing_subscriber::layer::{Context, SubscriberExt};
 
+        type LoggedEvent = (tracing::Level, BTreeMap<String, String>);
+
         #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<(tracing::Level, BTreeMap<String, String>)>>>);
+        struct Capture(Arc<Mutex<Vec<LoggedEvent>>>);
 
         struct Collector<'a>(&'a mut BTreeMap<String, String>);
         impl Visit for Collector<'_> {

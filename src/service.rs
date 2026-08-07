@@ -18,6 +18,7 @@ use crate::operations::browser::BrowserManager;
 use crate::url_guard::UrlGuard;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use mcp_core::telemetry::metrics::{self, Label};
 use mcp_core::{
     CallError, Content, McpService, ServerConfig, ToolDef, ToolReply, TransportKind, async_trait,
 };
@@ -72,6 +73,10 @@ impl WebService {
         Self { browser, guard }
     }
 
+    // `args` carries the url and is skipped: a tool argument is content, so it
+    // must never become a span field (D10). The span still gives this handler's
+    // own work its own timing, nested under mcp-core's `mcp.tools.call` span.
+    #[tracing::instrument(skip(self, args))]
     async fn execute_read(&self, args: &Value) -> Result<ToolReply, WebMcpError> {
         let raw_url = require_str(args, "url")?;
         let url = self.guard.check(raw_url).await?;
@@ -86,6 +91,7 @@ impl WebService {
         Ok(ToolReply::json(&result)?)
     }
 
+    #[tracing::instrument(skip(self, args))]
     async fn execute_screenshot(&self, args: &Value) -> Result<ToolReply, WebMcpError> {
         let raw_url = require_str(args, "url")?;
         let url = self.guard.check(raw_url).await?;
@@ -163,11 +169,59 @@ impl McpService for WebService {
     /// `CallError::Tool` per the MCP spec.
     async fn call_tool(&self, name: &str, arguments: &Value) -> Result<ToolReply, CallError> {
         let outcome = match name {
-            "web_read" => self.execute_read(arguments).await,
-            "web_screenshot" => self.execute_screenshot(arguments).await,
+            "web_read" => {
+                let result = self.execute_read(arguments).await;
+                record_upstream_failure("web_read", &result);
+                result
+            }
+            "web_screenshot" => {
+                let result = self.execute_screenshot(arguments).await;
+                record_upstream_failure("web_screenshot", &result);
+                result
+            }
             other => return Err(CallError::tool(format!("Tool not found: {other}"))),
         };
         outcome.map_err(|e| CallError::tool(e.to_string()))
+    }
+}
+
+/// Classify a tool failure as an upstream fault worth counting, or `None` for
+/// a policy decline (a guard-blocked URL) or a caller mistake (bad
+/// parameters, a reply that failed to serialize). Rule 8.2 keeps an
+/// operational decline out of a failure counter: `web.upstream_failures`
+/// tracks faults reaching outward, not input the caller or the operator's own
+/// SSRF policy chose to refuse.
+///
+/// Exhaustive over [`WebMcpError`], so a new variant forces this
+/// classification to be revisited rather than silently landing as "not
+/// counted".
+fn upstream_failure_reason(err: &WebMcpError) -> Option<&'static str> {
+    match err {
+        WebMcpError::Web(WebError::Navigation(_)) => Some("navigation"),
+        WebMcpError::Web(WebError::Timeout(_)) => Some("timeout"),
+        WebMcpError::Browser(_) => Some("browser"),
+        WebMcpError::Web(WebError::Blocked(_))
+        | WebMcpError::Web(WebError::InvalidParameters(_))
+        | WebMcpError::Json(_)
+        | WebMcpError::Io(_) => None,
+    }
+}
+
+/// Count a navigation-level failure against `web.upstream_failures`.
+///
+/// `tool` is always one of the two `&'static str` literals its two call sites
+/// pass, so the label is bounded there rather than by anything a caller
+/// supplies; `reason` is bounded the same way, by
+/// [`upstream_failure_reason`]'s fixed set of return values. Neither label is
+/// ever built from a URL or from any other caller-controlled string.
+fn record_upstream_failure(tool: &'static str, outcome: &Result<ToolReply, WebMcpError>) {
+    if let Err(err) = outcome
+        && let Some(reason) = upstream_failure_reason(err)
+    {
+        metrics::increment(
+            "web.upstream_failures",
+            &[Label::new("tool", tool), Label::new("reason", reason)],
+        );
     }
 }
 
@@ -251,9 +305,7 @@ mod tests {
             None
         );
         assert_eq!(
-            upstream_failure_reason(&WebMcpError::Web(WebError::InvalidParameters(
-                "x".into()
-            ))),
+            upstream_failure_reason(&WebMcpError::Web(WebError::InvalidParameters("x".into()))),
             None
         );
         assert_eq!(

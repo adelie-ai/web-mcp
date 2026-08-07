@@ -202,8 +202,7 @@ fn tool_call_error_leaves_no_url_in_any_span_field() {
     }
 
     let at_debug = recorded.events.iter().any(|event| {
-        event.level == Level::DEBUG
-            && event.fields.values().any(|value| value.contains(MARKER))
+        event.level == Level::DEBUG && event.fields.values().any(|value| value.contains(MARKER))
     });
     assert!(
         at_debug,
@@ -211,4 +210,37 @@ fn tool_call_error_leaves_no_url_in_any_span_field() {
          a line that was simply deleted; the events were {:?}",
         recorded.event_summary()
     );
+}
+
+/// AC: the tool handlers are instrumented — a span opens for each, nested
+/// under mcp-core's own `mcp.tools.call` span.
+#[test]
+fn each_tool_handler_opens_its_own_span() {
+    let recorded = capture_dispatch(&[
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "web_read", "arguments": {"url": MARKER}},
+        }),
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "web_screenshot", "arguments": {"url": MARKER}},
+        }),
+    ]);
+
+    for expected in ["execute_read", "execute_screenshot"] {
+        assert!(
+            recorded.spans.iter().any(|span| span.name == expected),
+            "expected a {expected:?} span; the spans were {:?}",
+            recorded
+                .spans
+                .iter()
+                .map(|span| span.name)
+                .collect::<Vec<_>>()
+        );
+    }
 }
