@@ -224,6 +224,94 @@ mod tests {
     }
 
     #[test]
+    fn upstream_failure_reason_counts_navigation_timeout_and_browser_faults() {
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Web(WebError::Navigation("x".into()))),
+            Some("navigation")
+        );
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Web(WebError::Timeout("x".into()))),
+            Some("timeout")
+        );
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Browser(
+                chromiumoxide::error::CdpError::NoResponse
+            )),
+            Some("browser")
+        );
+    }
+
+    #[test]
+    fn upstream_failure_reason_excludes_policy_and_input_declines() {
+        // A blocked URL and bad parameters are declines the caller (or the
+        // operator's own SSRF policy) chose, not a fault reaching outward —
+        // rule 8.2 keeps an operational decline out of a failure counter.
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Web(WebError::Blocked("x".into()))),
+            None
+        );
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Web(WebError::InvalidParameters(
+                "x".into()
+            ))),
+            None
+        );
+        assert_eq!(
+            upstream_failure_reason(&WebMcpError::Io(std::io::Error::other("x"))),
+            None
+        );
+        let json_err = serde_json::from_str::<Value>("not json").unwrap_err();
+        assert_eq!(upstream_failure_reason(&WebMcpError::Json(json_err)), None);
+    }
+
+    #[test]
+    fn record_upstream_failure_increments_only_for_counted_reasons() {
+        let labels = [
+            Label::new("tool", "web_read"),
+            Label::new("reason", "navigation"),
+        ];
+        let before = counter_total("web.upstream_failures", &labels);
+
+        let ok: std::result::Result<ToolReply, WebMcpError> = Ok(ToolReply::text(""));
+        record_upstream_failure("web_read", &ok);
+        let blocked: std::result::Result<ToolReply, WebMcpError> =
+            Err(WebMcpError::Web(WebError::Blocked("x".into())));
+        record_upstream_failure("web_read", &blocked);
+        assert_eq!(
+            counter_total("web.upstream_failures", &labels),
+            before,
+            "a successful call or a policy decline must not move the counter"
+        );
+
+        let navigation_failed: std::result::Result<ToolReply, WebMcpError> =
+            Err(WebMcpError::Web(WebError::Navigation("x".into())));
+        record_upstream_failure("web_read", &navigation_failed);
+        assert_eq!(
+            counter_total("web.upstream_failures", &labels),
+            before + 1,
+            "a navigation fault must increment the counter, labelled by tool and reason"
+        );
+    }
+
+    fn counter_total(name: &str, labels: &[Label]) -> u64 {
+        metrics::global()
+            .snapshot()
+            .counters
+            .iter()
+            .find(|counter| counter.name == name && same_labels(&counter.labels, labels))
+            .map_or(0, |counter| counter.total)
+    }
+
+    fn same_labels(recorded: &[Label], wanted: &[Label]) -> bool {
+        recorded.len() == wanted.len()
+            && wanted.iter().all(|want| {
+                recorded
+                    .iter()
+                    .any(|have| have.key() == want.key() && have.value() == want.value())
+            })
+    }
+
+    #[test]
     fn server_config_advertises_instructions() {
         // The daemon uses the MCP `instructions` string as this server's
         // searchable, model-facing description, so the config must advertise a
