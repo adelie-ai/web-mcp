@@ -74,6 +74,41 @@ A single headless Chrome instance is launched lazily on first browse and reused
 for the life of the process (each request gets its own tab); it is relaunched
 automatically if it dies.
 
+## Logging
+
+`mcp-core`'s `run` installs the process subscriber; this crate calls nothing
+to get it. Logs go to stderr, never stdout — the stdio transport frames
+JSON-RPC on stdout, and one log line there would corrupt the protocol stream.
+`RUST_LOG` sets the level (default `info`); see `mcp-core`'s own README for
+the full level contract, the request/tool-call spans, and the standard
+`OTEL_*` environment variables.
+
+What this server adds on top of what it inherits:
+
+- A `debug!` line each time it navigates the browser to a URL — the one
+  outbound network call this server makes. A page URL is a tool argument, so
+  it stays at DEBUG and is never attached to a span; `RUST_LOG=debug` is what
+  it takes to see it.
+- `web.upstream_failures`, a counter labelled `tool` and `reason`
+  (`navigation`, `timeout`, or `browser`), for a failure reaching outward. A
+  blocked URL or a bad parameter is a decline, not a fault, and is not
+  counted here.
+- `mcp-core` already records a tool-call counter and a latency histogram by
+  tool and outcome (`mcp.tools.call`, `mcp.tools.call.duration`); this server
+  does not duplicate them.
+
+### The `otel` feature
+
+Off by default. A pure passthrough — `web-mcp -> mcp-core -> adelie-telemetry`
+— so this crate takes no direct dependency on `adelie-telemetry` or on any
+opentelemetry crate. With the feature off, `cargo tree` resolves no
+opentelemetry crate at all.
+
+```bash
+cargo build --features otel
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 ./target/debug/web-mcp serve --mode stdio
+```
+
 ## Architecture
 
 Protocol/transport/CLI plumbing comes from the shared `mcp-core` crate; this
@@ -89,12 +124,17 @@ crate supplies the web-specific pieces:
 ## Testing
 
 ```bash
-cargo test                       # unit + protocol/validation/SSRF tests (no network)
+just check                       # default features: fmt, lint, build, test
+just check-otel                  # the same, built with --features otel
 just test-network                # additionally launch Chrome and hit the live web
 ```
 
 Network- and browser-dependent integration tests are gated behind
-`RUN_NETWORK_TESTS=1` so the default suite is deterministic and offline.
+`RUN_NETWORK_TESTS=1` so the default suite is deterministic and offline. The
+`tests/telemetry_*.rs` files are the telemetry acceptance suite: that stdout
+carries only JSON-RPC at `RUST_LOG=trace`, that no page URL reaches an INFO
+line or a span field, and that a default build resolves no opentelemetry
+crate.
 
 ## License
 
