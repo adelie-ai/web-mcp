@@ -365,6 +365,23 @@ fn test_screenshot_refuses_a_save_as_outside_the_screenshot_directory() {
 }
 
 #[test]
+fn test_screenshot_refuses_the_save_as_before_it_resolves_the_url() {
+    // Both arguments are bad. The reply must name the path, not the host: that
+    // is what proves the path is settled before the URL is resolved, so a bad
+    // path costs no DNS lookup and no page load. A loopback URL is used because
+    // the guard would refuse it without a network round trip either way.
+    let mut client = McpStdioClient::start();
+    client.initialize();
+    let res = client
+        .tool_call(
+            "web_screenshot",
+            json!({"url": "http://127.0.0.1/", "save_as": "../escaped.png"}),
+        )
+        .expect("result");
+    expect_tool_error_contains(&res, "save_as");
+}
+
+#[test]
 fn test_screenshot_blocks_loopback_ssrf() {
     let mut client = McpStdioClient::start();
     client.initialize();

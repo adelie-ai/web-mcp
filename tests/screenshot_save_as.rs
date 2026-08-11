@@ -262,3 +262,49 @@ fn refuses_a_symlinked_directory_that_points_out_of_the_root() {
         "nothing may be written through the symlinked directory"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn refuses_a_symlinked_directory_before_creating_anything_beneath_it() {
+    // The nested case: a refusal must not create the directories on the way to
+    // a path it is about to refuse, or an attacker-named path becomes an
+    // attacker-directed mkdir outside the boundary.
+    let scratch = Scratch::new();
+    let root = scratch.join("shots");
+    fs::create_dir_all(&root).expect("create the root");
+    let outside = scratch.join("outside-dir");
+    fs::create_dir_all(&outside).expect("create the outside directory");
+    std::os::unix::fs::symlink(&outside, root.join("escape")).expect("symlink");
+
+    let dir = ScreenshotDir::new(&root);
+
+    assert_refused(
+        dir.save_png("escape/deep/nested/shot.png", PNG_1X1),
+        "a path through a symlinked directory",
+    );
+    assert!(
+        !outside.join("deep").exists(),
+        "no directory may be created outside the root"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn refuses_a_screenshot_directory_that_is_itself_a_symbolic_link() {
+    // Resolving a symlinked root would make its target the boundary, so every
+    // later containment check would pass against a directory web-mcp never
+    // chose. That is the shared-temp-directory hijack.
+    let scratch = Scratch::new();
+    let elsewhere = scratch.join("elsewhere");
+    fs::create_dir_all(&elsewhere).expect("create the other directory");
+    let root = scratch.join("shots");
+    std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink the root");
+
+    let dir = ScreenshotDir::new(&root);
+
+    assert_refused(dir.save_png("shot.png", PNG_1X1), "a symlinked root");
+    assert!(
+        !elsewhere.join("shot.png").exists(),
+        "nothing may be written through the symlinked root"
+    );
+}

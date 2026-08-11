@@ -36,7 +36,11 @@ created and an existing file is replaced, so the same call twice leaves one
 file. Everything else is refused: a `..` component, an absolute path outside the
 directory, a symbolic link as the target or on the way to it, and any extension
 other than `.png`. A path refused on its own text is refused before the page is
-fetched.
+fetched, so it costs no lookup and no page load, and creates nothing.
+
+The screenshot directory must not itself be a symbolic link. Resolving one would
+make its target the boundary, so every containment check afterwards would pass
+against a directory web-mcp never chose. Configure the location it points at.
 
 Omitting `save_as` keeps the original behaviour and returns the image inline.
 

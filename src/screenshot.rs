@@ -9,8 +9,10 @@
 //!
 //! [`ScreenshotDir`] is the boundary. It owns one directory and resolves every
 //! `save_as` inside it: no parent-directory hop, no absolute path elsewhere, no
-//! symlink out, and no extension other than `.png`. Paths are built with
-//! [`Path::join`], never by joining strings.
+//! symlink out, and no extension other than `.png`. The directory itself must
+//! not be a symbolic link either, or its target would silently become the
+//! boundary. Paths are built with [`Path::join`], never by joining strings, and
+//! a refused path creates nothing.
 //!
 //! Non-goals: this module does not capture, decode, or re-encode an image. It
 //! reads the PNG header for the dimensions it reports and writes the bytes it
@@ -103,43 +105,71 @@ impl ScreenshotDir {
     /// parent directories it needs.
     ///
     /// The checks run in two stages, and the order matters. The first stage
-    /// reads the path and creates nothing, so a refused path leaves no trace -
-    /// not even the screenshot directory. The second stage then resolves
-    /// symlinks and re-checks containment, which is what catches a link planted
-    /// inside the directory that points out of it.
+    /// reads the path and creates nothing, so a path refused there leaves no
+    /// trace - not even the screenshot directory. The second stage walks the
+    /// path one directory at a time, and creates a directory only below ground
+    /// it has already proved is inside the root. That is what keeps a refusal
+    /// from creating anything outside the boundary, and what catches a link
+    /// planted inside the directory that points out of it.
     fn resolve(&self, save_as: &str) -> Result<PathBuf> {
         let relative = self.relative_within_root(save_as)?;
+        let root = self.resolved_root()?;
 
-        // Filesystem stage. Create the directory, then resolve it: a caller's
-        // path is only ever compared against the fully-resolved root.
-        fs::create_dir_all(&self.root)?;
-        let root = fs::canonicalize(&self.root)?;
-        let target = root.join(&relative);
+        // Every component of `relative` is Normal - `relative_within_root`
+        // refused anything else - and there is at least one, the file name.
+        let components: Vec<&std::ffi::OsStr> =
+            relative.components().map(Component::as_os_str).collect();
+        let (name, directories) = components
+            .split_last()
+            .expect("relative_within_root returns at least one component");
 
-        let parent = target
-            .parent()
-            .ok_or_else(|| refuse(save_as, "it has no parent directory"))?;
-        fs::create_dir_all(parent)?;
-        let parent = fs::canonicalize(parent)?;
-        if !parent.starts_with(&root) {
-            return Err(refuse(
-                save_as,
-                "its directory resolves outside the screenshot directory",
-            ));
+        // Walk down from the root. `dir` is only ever a directory already
+        // proved to resolve inside the root, so each step creates inside it.
+        let mut dir = root.clone();
+        for part in directories {
+            let next = dir.join(part);
+            if is_symlink(&next) {
+                return Err(refuse(
+                    save_as,
+                    "a directory on the way to it is a symbolic link",
+                ));
+            }
+            fs::create_dir_all(&next)?;
+            dir = fs::canonicalize(&next)?;
+            if !dir.starts_with(&root) {
+                return Err(refuse(
+                    save_as,
+                    "its directory resolves outside the screenshot directory",
+                ));
+            }
         }
 
-        // A path that resolves inside the directory can still be a symlink whose
-        // target is not. Replacing a symlink writes through it, so refuse one.
-        if let Ok(meta) = fs::symlink_metadata(&target)
-            && meta.file_type().is_symlink()
-        {
+        // The file itself can be a symlink whose target is elsewhere. Writing
+        // to a symlink writes through it, so refuse one.
+        let target = dir.join(name);
+        if is_symlink(&target) {
             return Err(refuse(save_as, "it is a symbolic link"));
         }
+        Ok(target)
+    }
 
-        let name = target
-            .file_name()
-            .ok_or_else(|| refuse(save_as, "it does not name a file"))?;
-        Ok(parent.join(name))
+    /// Create the screenshot directory if it is missing and return its resolved
+    /// path, which is the boundary every other path is measured against.
+    ///
+    /// The directory itself must not be a symbolic link. Resolving one would
+    /// make its target the boundary, so every containment check afterwards
+    /// would pass against a directory web-mcp never chose. An operator who
+    /// wants a linked location can configure the location it points at.
+    fn resolved_root(&self) -> Result<PathBuf> {
+        if is_symlink(&self.root) {
+            return Err(WebError::InvalidParameters(format!(
+                "the screenshot directory '{}' is a symbolic link; configure the directory it points at instead",
+                self.root.display()
+            ))
+            .into());
+        }
+        fs::create_dir_all(&self.root)?;
+        Ok(fs::canonicalize(&self.root)?)
     }
 
     /// Read `save_as` and return the relative path it names inside the root.
@@ -212,6 +242,12 @@ impl ScreenshotDir {
         let resolved = fs::canonicalize(&self.root).ok()?;
         given.strip_prefix(resolved).ok().map(Path::to_path_buf)
     }
+}
+
+/// True when `path` exists and is a symbolic link. A path that does not exist,
+/// or that cannot be read, is not one.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Build the refusal for a `save_as` the directory will not accept. The path is

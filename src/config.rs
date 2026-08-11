@@ -20,8 +20,10 @@ const SCREENSHOT_DIR_NAME: &str = "web-mcp/screenshots";
 /// Prefers a per-user cache directory - `$XDG_CACHE_HOME`, else `$HOME/.cache` -
 /// and falls back to the system temp directory only when neither is set. Why not
 /// the temp directory first: it is shared between every user on the machine, so
-/// a fixed name there is a path another user can create or point elsewhere
-/// before web-mcp gets to it.
+/// a fixed name there is a path another user can create before web-mcp gets to
+/// it. Pointing it elsewhere is refused either way, because
+/// [`ScreenshotDir`](crate::screenshot::ScreenshotDir) will not take a directory
+/// that is a symbolic link.
 pub fn default_screenshot_dir() -> PathBuf {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
