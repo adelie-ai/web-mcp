@@ -36,8 +36,11 @@ created and an existing file is replaced, so the same call twice leaves one
 file. Everything else is refused:
 
 - a `..` component, and an absolute path outside the directory;
-- a symbolic link as the target or on the way to it, and a hard link to a file
-  that also lives elsewhere;
+- a symbolic link as the target or on the way to it, and a file that already
+  has another name elsewhere (a hard link), because writing would change that
+  file too. This can refuse a file web-mcp wrote itself, if something has since
+  linked to it - a deduplication pass over a cache directory does that. Use
+  another name;
 - a name that is not `.png` (the check ignores case, so `.PNG` is accepted);
 - a path more than eight levels under the directory, because every level becomes
   a directory that is never reclaimed.
@@ -52,6 +55,12 @@ environment of the servers it spawns. `save_as` is then refused and says to set
 directory is deliberately not used as a fallback: any other user on the machine
 can create that name first, as a link to a directory of their own, and receive
 every screenshot.
+
+**Give `--screenshot-dir` a directory only this user can write.** A location
+under a shared directory such as `/tmp` can be created, or linked elsewhere, by
+another user before web-mcp starts; web-mcp resolves the directory it is given
+and would then treat theirs as the boundary. This is why there is no shared-
+directory default, and it applies to the flag as well.
 
 The checks are made against the filesystem as it is when they run, so they bound
 the `save_as` string - not another process running as the same user, which

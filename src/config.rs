@@ -27,12 +27,24 @@ const SCREENSHOT_DIR_NAME: &str = "web-mcp/screenshots";
 /// is worse than no default: with `None`, `save_as` is refused and says to set
 /// `--screenshot-dir`, and screenshots still come back inline.
 pub fn default_screenshot_dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CACHE_HOME")
+    screenshot_dir_under(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+/// The body of [`default_screenshot_dir`], with the two variables passed in.
+///
+/// Why the seam: read from the process environment, the "no per-user directory"
+/// branch is unreachable on any machine that sets `HOME`, which is every machine
+/// a test runs on. A test of that branch has to be able to reach it, or it
+/// cannot fail when the branch changes.
+fn screenshot_dir_under(
+    xdg_cache_home: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let base = xdg_cache_home
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
         .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
+            home.map(PathBuf::from)
                 .filter(|dir| dir.is_absolute())
                 .map(|home| home.join(".cache"))
         })?;
@@ -90,17 +102,43 @@ mod tests {
         );
     }
 
+    fn some(value: &str) -> Option<std::ffi::OsString> {
+        Some(std::ffi::OsString::from(value))
+    }
+
     #[test]
-    fn default_screenshot_dir_never_chooses_the_shared_temp_directory() {
-        // The shared temp directory is the one place a default must not land:
-        // another user can create the name first and point it at themselves.
-        // With no per-user directory to choose, there is no default at all.
-        if let Some(dir) = default_screenshot_dir() {
-            assert!(
-                !dir.starts_with(std::env::temp_dir()),
-                "{} must not be under the shared temp directory",
-                dir.display()
-            );
-        }
+    fn there_is_no_default_screenshot_dir_without_a_per_user_directory() {
+        // The property the whole boundary rests on. The shared temp directory
+        // is the one place a default must not land - another user can create
+        // the name first, as a link to a directory of their own, and receive
+        // every screenshot. So with nothing per-user to choose, the answer is
+        // no directory at all. This is the test that fails if a fallback is
+        // ever added back.
+        assert_eq!(screenshot_dir_under(None, None), None);
+    }
+
+    #[test]
+    fn a_relative_or_empty_setting_is_not_a_per_user_directory_either() {
+        // A relative path would resolve against whatever the working directory
+        // happens to be, so it is not a directory web-mcp chose.
+        assert_eq!(screenshot_dir_under(some("cache"), None), None);
+        assert_eq!(screenshot_dir_under(some(""), some("")), None);
+        assert_eq!(
+            screenshot_dir_under(some("cache"), some("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/web-mcp/screenshots")),
+            "a bad first choice falls through to the second, not to nothing"
+        );
+    }
+
+    #[test]
+    fn the_cache_directory_is_preferred_over_the_home_directory() {
+        assert_eq!(
+            screenshot_dir_under(some("/var/cache/mine"), some("/home/someone")),
+            Some(PathBuf::from("/var/cache/mine/web-mcp/screenshots"))
+        );
+        assert_eq!(
+            screenshot_dir_under(None, some("/home/someone")),
+            Some(PathBuf::from("/home/someone/.cache/web-mcp/screenshots"))
+        );
     }
 }

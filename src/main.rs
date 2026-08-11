@@ -39,7 +39,10 @@ struct Local {
     /// Directory web_screenshot writes a `save_as` file into. A caller may name
     /// a path inside it and nowhere else. Defaults to
     /// $XDG_CACHE_HOME/web-mcp/screenshots; without a per-user cache directory
-    /// there is no default and save_as is refused.
+    /// there is no default and save_as is refused. Give a directory only this
+    /// user can write: a location under a shared directory such as /tmp can be
+    /// created, or linked elsewhere, by another user before web-mcp starts, and
+    /// web-mcp would then resolve it and treat their directory as the boundary.
     #[arg(long, env = "WEB_SCREENSHOT_DIR")]
     screenshot_dir: Option<PathBuf>,
 }

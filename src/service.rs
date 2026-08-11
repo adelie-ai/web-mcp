@@ -398,6 +398,43 @@ mod tests {
     }
 
     #[test]
+    fn without_a_screenshot_directory_save_as_is_refused_and_names_the_flag() {
+        // The server reaches this whenever the host strips its environment and
+        // no directory was configured. The caller must be told what to do, and
+        // the operator must be told what to set.
+        match screenshot_reply(None, TINY_PNG, Some("shot.png")) {
+            Err(WebMcpError::Web(WebError::InvalidParameters(message))) => {
+                assert!(
+                    message.contains("--screenshot-dir"),
+                    "the refusal should name the flag that fixes it: {message}"
+                );
+            }
+            other => panic!("expected an invalid-parameter refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_a_screenshot_directory_the_image_still_comes_back_inline() {
+        // The other half: no directory takes save_as away, not screenshots.
+        let reply = screenshot_reply(None, TINY_PNG, None).expect("inline reply");
+        let Content::Raw(block) = &reply.content[0] else {
+            panic!("expected a raw image content block");
+        };
+        assert_eq!(block["mimeType"], json!("image/png"));
+    }
+
+    #[test]
+    fn a_service_built_without_a_screenshot_directory_holds_none() {
+        // The wiring, not just the helper: a config carrying no directory must
+        // reach the service as no directory.
+        let config = WebConfig {
+            screenshot_dir: None,
+            ..WebConfig::default()
+        };
+        assert!(WebService::with_config(config).screenshots.is_none());
+    }
+
+    #[test]
     fn web_screenshot_schema_offers_save_as_and_still_requires_only_the_url() {
         // save_as is optional: omitting it keeps the pre-existing inline-image
         // behaviour, so an existing caller is not broken by this parameter.

@@ -39,10 +39,11 @@ use std::path::{Component, Path, PathBuf};
 /// keeps the tool from being steered into writing a shell profile or a script.
 const REQUIRED_EXTENSION: &str = "png";
 
-/// How deep under the directory a `save_as` may go. A screenshot needs a name
-/// and at most a little grouping; a deeper path is a caller creating
-/// directories, not filing a capture. Each component becomes a directory that
-/// is never reclaimed, so the depth is bounded here.
+/// How many path components a `save_as` may have, the file name included - so
+/// at most seven directory levels and a name. A screenshot needs a name and at
+/// most a little grouping; a deeper path is a caller creating directories, not
+/// filing a capture. Each level becomes a directory that is never reclaimed, so
+/// the depth is bounded here.
 const MAX_PATH_COMPONENTS: usize = 8;
 
 /// The PNG signature, the first eight bytes of every PNG file.
@@ -163,13 +164,22 @@ impl ScreenshotDir {
 
         // The file itself can be a link whose other end is elsewhere. Writing to
         // it writes through, so refuse both kinds: a symbolic link, and a file
-        // that already carries more than one name.
+        // that already carries more than one name. An existing directory is
+        // checked first, so it is named as one rather than as a link - on some
+        // filesystems a directory's link count is 2 even when it is empty.
         let target = dir.join(name);
         if is_symlink(&target) {
             return Err(refuse(save_as, "it is a symbolic link"));
         }
+        if is_existing_directory(&target) {
+            return Err(refuse(save_as, "a directory of that name already exists"));
+        }
         if is_multiply_linked(&target) {
-            return Err(refuse(save_as, "it is a hard link to another file"));
+            return Err(refuse(
+                save_as,
+                "the file already there has another name elsewhere, so writing \
+                 would change that file too; choose a different name",
+            ));
         }
         Ok(target)
     }
@@ -248,7 +258,7 @@ impl ScreenshotDir {
         if relative.components().count() > MAX_PATH_COMPONENTS {
             return Err(refuse(
                 save_as,
-                "it goes more than 8 levels under the screenshot directory",
+                "it has more than 8 path components, counting the file name",
             ));
         }
         let is_png = relative
@@ -278,10 +288,21 @@ fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
+/// True when `path` is an existing directory. Checked before the link count,
+/// because a directory's link count is 2 or more on several filesystems and
+/// would otherwise be reported as a link.
+fn is_existing_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
+}
+
 /// True when `path` exists and already carries more than one name, so writing
 /// to it would write through to a file that may be outside the directory. A
 /// hard link is a regular file to [`fs::symlink_metadata`], so the link count
 /// is the only thing that tells the two apart.
+///
+/// This refuses a file web-mcp wrote itself once something else links to it -
+/// a deduplication pass over a cache directory does exactly that. Refusing is
+/// the safe direction, and the caller can use another name.
 #[cfg(unix)]
 fn is_multiply_linked(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;

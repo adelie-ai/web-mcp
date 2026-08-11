@@ -21,11 +21,25 @@ impl McpStdioClient {
     /// Start the server with extra `serve` flags, for a test that needs its own
     /// screenshot directory rather than the operator default.
     fn start_with_args(extra: &[String]) -> Self {
+        Self::spawn(extra, false)
+    }
+
+    /// Start the server with nothing in its environment, as a host that strips
+    /// the environment of the servers it spawns leaves it. `PATH` is kept
+    /// because the server resolves its own subprocesses through it.
+    fn start_without_environment() -> Self {
+        Self::spawn(&[], true)
+    }
+
+    fn spawn(extra: &[String], clear_environment: bool) -> Self {
         let exe = env!("CARGO_BIN_EXE_web-mcp");
 
-        let mut child = Command::new(exe)
-            .args(["serve", "--mode", "stdio"])
-            .args(extra)
+        let mut command = Command::new(exe);
+        command.args(["serve", "--mode", "stdio"]).args(extra);
+        if clear_environment {
+            command.env_clear().env("PATH", "/usr/bin:/bin");
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -379,6 +393,27 @@ fn test_screenshot_refuses_the_save_as_before_it_resolves_the_url() {
         )
         .expect("result");
     expect_tool_error_contains(&res, "save_as");
+}
+
+#[test]
+fn test_screenshot_refuses_save_as_when_the_server_has_no_screenshot_directory() {
+    // With no XDG_CACHE_HOME and no HOME there is no per-user directory to
+    // default to, and web-mcp will not fall back to the shared temp directory.
+    // The caller is refused and the operator is told which flag to set. No
+    // browser or network is reached: the answer comes from the path alone.
+    let mut client = McpStdioClient::start_without_environment();
+    client.initialize();
+    let res = client
+        .tool_call(
+            "web_screenshot",
+            json!({"url": "https://example.com", "save_as": "shot.png"}),
+        )
+        .expect("result");
+    expect_tool_error_contains(&res, "--screenshot-dir");
+    assert!(
+        !std::path::Path::new(&std::env::temp_dir().join("web-mcp/screenshots")).exists(),
+        "nothing may be created in the shared temp directory"
+    );
 }
 
 #[test]
