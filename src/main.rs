@@ -7,7 +7,8 @@
 // a `WebService` to dispatch against.
 
 use clap::Args;
-use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, WebConfig};
+use std::path::PathBuf;
+use web_mcp::config::{DEFAULT_NAV_TIMEOUT_MS, WebConfig, default_screenshot_dir};
 use web_mcp::{WebService, server_config};
 
 /// web-mcp's own `serve` flags, flattened by mcp-core alongside its
@@ -35,6 +36,11 @@ struct Local {
     /// Navigation timeout in milliseconds for web_read / web_screenshot.
     #[arg(long, env = "WEB_NAV_TIMEOUT_MS", default_value_t = DEFAULT_NAV_TIMEOUT_MS)]
     nav_timeout_ms: u64,
+    /// Directory web_screenshot writes a `save_as` file into. A caller may name
+    /// a path inside it and nowhere else. Defaults to
+    /// $XDG_CACHE_HOME/web-mcp/screenshots.
+    #[arg(long, env = "WEB_SCREENSHOT_DIR")]
+    screenshot_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -56,6 +62,7 @@ async fn main() -> mcp_core::Result<()> {
             chrome_args: local.chrome_arg,
             allow_private_hosts: local.allow_private_hosts,
             nav_timeout_ms: local.nav_timeout_ms,
+            screenshot_dir: local.screenshot_dir.unwrap_or_else(default_screenshot_dir),
         };
         Ok(WebService::with_config(web_config))
     })

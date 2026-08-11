@@ -15,10 +15,17 @@ struct McpStdioClient {
 
 impl McpStdioClient {
     fn start() -> Self {
+        Self::start_with_args(&[])
+    }
+
+    /// Start the server with extra `serve` flags, for a test that needs its own
+    /// screenshot directory rather than the operator default.
+    fn start_with_args(extra: &[String]) -> Self {
         let exe = env!("CARGO_BIN_EXE_web-mcp");
 
         let mut child = Command::new(exe)
             .args(["serve", "--mode", "stdio"])
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -337,6 +344,27 @@ fn test_read_blocks_loopback_ssrf() {
 }
 
 #[test]
+fn test_screenshot_refuses_a_save_as_outside_the_screenshot_directory() {
+    // The path is refused on its own text, so this needs no network and no
+    // browser: the server answers before it resolves the URL.
+    let mut client = McpStdioClient::start();
+    client.initialize();
+    for escape in ["../escaped.png", "/etc/web-mcp-escaped.png", "escaped.sh"] {
+        let res = client
+            .tool_call(
+                "web_screenshot",
+                json!({"url": "https://example.com", "save_as": escape}),
+            )
+            .expect("result");
+        expect_tool_error_contains(&res, "refused");
+    }
+    assert!(
+        !std::path::Path::new("/etc/web-mcp-escaped.png").exists(),
+        "nothing may be written outside the screenshot directory"
+    );
+}
+
+#[test]
 fn test_screenshot_blocks_loopback_ssrf() {
     let mut client = McpStdioClient::start();
     client.initialize();
@@ -387,6 +415,54 @@ fn test_read_example_com_network() {
         page["content"]
     );
     assert!(page["links"].is_array());
+}
+
+#[test]
+fn test_screenshot_save_as_writes_a_file_network() {
+    if !network_tests_enabled() {
+        eprintln!("Skipping network test (set RUN_NETWORK_TESTS=1 to enable)");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("web-mcp-save-as-e2e-{}", std::process::id()));
+    let mut client = McpStdioClient::start_with_args(&[
+        "--screenshot-dir".to_string(),
+        dir.to_string_lossy().into_owned(),
+    ]);
+    client.initialize();
+
+    let result = client
+        .tool_call(
+            "web_screenshot",
+            json!({"url": "https://example.com", "save_as": "example.png"}),
+        )
+        .expect("web_screenshot with save_as");
+    let saved = extract_json(&result);
+
+    let path = saved["path"].as_str().expect("a path in the reply");
+    assert!(
+        std::path::Path::new(path).starts_with(&dir),
+        "{path} should be inside {}",
+        dir.display()
+    );
+    let bytes = std::fs::read(path).expect("read the written screenshot");
+    assert!(bytes.len() > 100, "screenshot file implausibly small");
+    assert_eq!(
+        &bytes[..8],
+        &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+    );
+    assert!(
+        saved["width"].as_u64().unwrap_or(0) > 0,
+        "width is reported"
+    );
+    assert!(
+        result["content"]
+            .as_array()
+            .expect("content array")
+            .iter()
+            .all(|entry| entry["type"] != json!("image")),
+        "a saved screenshot must not also carry the image inline"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

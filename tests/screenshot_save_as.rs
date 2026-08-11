@@ -116,7 +116,9 @@ fn creates_missing_subdirectories_under_the_root() {
     let root = scratch.join("shots");
     let dir = ScreenshotDir::new(&root);
 
-    let saved = dir.save_png("reports/2026/pricing.png", PNG_1X1).expect("save");
+    let saved = dir
+        .save_png("reports/2026/pricing.png", PNG_1X1)
+        .expect("save");
 
     let written = PathBuf::from(&saved.path);
     assert!(written.is_file(), "the nested file should exist");
@@ -144,9 +146,14 @@ fn writing_the_same_path_twice_leaves_one_file_with_the_later_content() {
     let dir = ScreenshotDir::new(scratch.join("shots"));
 
     let first = dir.save_png("same.png", PNG_1X1).expect("first save");
-    let second = dir.save_png("same.png", &png_1280x720()).expect("second save");
+    let second = dir
+        .save_png("same.png", &png_1280x720())
+        .expect("second save");
 
-    assert_eq!(first.path, second.path, "the same request yields the same path");
+    assert_eq!(
+        first.path, second.path,
+        "the same request yields the same path"
+    );
     assert_eq!(
         fs::read(&second.path).expect("read back"),
         png_1280x720(),
@@ -185,8 +192,14 @@ fn refuses_an_absolute_path_outside_the_root() {
     let dir = ScreenshotDir::new(scratch.join("shots"));
     let outside = scratch.join("outside.png");
 
-    assert_refused(dir.save_png(&outside.to_string_lossy(), PNG_1X1), "an absolute path outside the root");
-    assert_refused(dir.save_png("/etc/web-mcp-escaped.png", PNG_1X1), "an absolute system path");
+    assert_refused(
+        dir.save_png(&outside.to_string_lossy(), PNG_1X1),
+        "an absolute path outside the root",
+    );
+    assert_refused(
+        dir.save_png("/etc/web-mcp-escaped.png", PNG_1X1),
+        "an absolute system path",
+    );
     assert!(!outside.exists(), "nothing may be written outside the root");
 }
 
@@ -240,7 +253,10 @@ fn refuses_a_symlinked_directory_that_points_out_of_the_root() {
 
     let dir = ScreenshotDir::new(&root);
 
-    assert_refused(dir.save_png("escape/shot.png", PNG_1X1), "a symlinked directory");
+    assert_refused(
+        dir.save_png("escape/shot.png", PNG_1X1),
+        "a symlinked directory",
+    );
     assert!(
         !outside.join("shot.png").exists(),
         "nothing may be written through the symlinked directory"
