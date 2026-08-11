@@ -11,20 +11,22 @@ use std::path::PathBuf;
 /// Default navigation timeout (milliseconds) for `web_read` / `web_screenshot`.
 pub const DEFAULT_NAV_TIMEOUT_MS: u64 = 30_000;
 
-/// Directory name `web_screenshot` writes under, inside whichever base
+/// Directory name `web_screenshot` writes under, inside the per-user cache
 /// directory [`default_screenshot_dir`] settles on.
 const SCREENSHOT_DIR_NAME: &str = "web-mcp/screenshots";
 
-/// Where `web_screenshot` writes when the operator names no directory.
+/// Where `web_screenshot` writes when the operator names no directory, or
+/// `None` when there is nowhere safe to choose.
 ///
-/// Prefers a per-user cache directory - `$XDG_CACHE_HOME`, else `$HOME/.cache` -
-/// and falls back to the system temp directory only when neither is set. Why not
-/// the temp directory first: it is shared between every user on the machine, so
-/// a fixed name there is a path another user can create before web-mcp gets to
-/// it. Pointing it elsewhere is refused either way, because
-/// [`ScreenshotDir`](crate::screenshot::ScreenshotDir) will not take a directory
-/// that is a symbolic link.
-pub fn default_screenshot_dir() -> PathBuf {
+/// The choice is a per-user cache directory: `$XDG_CACHE_HOME`, else
+/// `$HOME/.cache`. There is deliberately no fall back to the system temp
+/// directory. That directory is shared with every other user on the machine, so
+/// a fixed name inside it is one any of them can create first - as a symbolic
+/// link to a directory of their own, which web-mcp would then resolve and treat
+/// as its boundary, handing them every screenshot. A default nobody can trust
+/// is worse than no default: with `None`, `save_as` is refused and says to set
+/// `--screenshot-dir`, and screenshots still come back inline.
+pub fn default_screenshot_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|dir| dir.is_absolute())
@@ -33,11 +35,8 @@ pub fn default_screenshot_dir() -> PathBuf {
                 .map(PathBuf::from)
                 .filter(|dir| dir.is_absolute())
                 .map(|home| home.join(".cache"))
-        });
-    match base {
-        Some(base) => base.join(SCREENSHOT_DIR_NAME),
-        None => std::env::temp_dir().join(SCREENSHOT_DIR_NAME),
-    }
+        })?;
+    Some(base.join(SCREENSHOT_DIR_NAME))
 }
 
 /// Browser settings and safety policy.
@@ -56,10 +55,11 @@ pub struct WebConfig {
     pub allow_private_hosts: bool,
     /// Navigation timeout in milliseconds.
     pub nav_timeout_ms: u64,
-    /// The one directory `web_screenshot` may write a `save_as` file into.
-    /// Every caller-supplied path is resolved inside it; see
-    /// [`ScreenshotDir`](crate::screenshot::ScreenshotDir).
-    pub screenshot_dir: PathBuf,
+    /// The one directory `web_screenshot` may write a `save_as` file into, or
+    /// `None` when none is configured and none can be defaulted safely - in
+    /// which case `save_as` is refused. Every caller-supplied path is resolved
+    /// inside it; see [`ScreenshotDir`](crate::screenshot::ScreenshotDir).
+    pub screenshot_dir: Option<PathBuf>,
 }
 
 impl Default for WebConfig {
@@ -80,12 +80,27 @@ mod tests {
 
     #[test]
     fn default_screenshot_dir_is_absolute_and_named_for_web_mcp() {
-        let dir = default_screenshot_dir();
+        // Every environment this runs in has HOME, so a directory is chosen.
+        let dir = default_screenshot_dir().expect("a per-user cache directory");
         assert!(dir.is_absolute(), "{} should be absolute", dir.display());
         assert!(
             dir.ends_with("web-mcp/screenshots"),
             "{} should be web-mcp's own directory",
             dir.display()
         );
+    }
+
+    #[test]
+    fn default_screenshot_dir_never_chooses_the_shared_temp_directory() {
+        // The shared temp directory is the one place a default must not land:
+        // another user can create the name first and point it at themselves.
+        // With no per-user directory to choose, there is no default at all.
+        if let Some(dir) = default_screenshot_dir() {
+            assert!(
+                !dir.starts_with(std::env::temp_dir()),
+                "{} must not be under the shared temp directory",
+                dir.display()
+            );
+        }
     }
 }

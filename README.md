@@ -33,14 +33,29 @@ needs a path to. Give `save_as` a file name and web-mcp writes the file instead:
 `save_as` is a path **inside the screenshot directory** (`--screenshot-dir`,
 default `$XDG_CACHE_HOME/web-mcp/screenshots`). Missing subdirectories are
 created and an existing file is replaced, so the same call twice leaves one
-file. Everything else is refused: a `..` component, an absolute path outside the
-directory, a symbolic link as the target or on the way to it, and any extension
-other than `.png`. A path refused on its own text is refused before the page is
-fetched, so it costs no lookup and no page load, and creates nothing.
+file. Everything else is refused:
 
-The screenshot directory must not itself be a symbolic link. Resolving one would
-make its target the boundary, so every containment check afterwards would pass
-against a directory web-mcp never chose. Configure the location it points at.
+- a `..` component, and an absolute path outside the directory;
+- a symbolic link as the target or on the way to it, and a hard link to a file
+  that also lives elsewhere;
+- a name that is not `.png` (the check ignores case, so `.PNG` is accepted);
+- a path more than eight levels under the directory, because every level becomes
+  a directory that is never reclaimed.
+
+A path refused on its own text is refused before the page is fetched, so it
+costs no lookup and no page load, and creates nothing.
+
+There is **no default directory** when neither `$XDG_CACHE_HOME` nor `$HOME`
+gives an absolute path, which is what happens when the host strips the
+environment of the servers it spawns. `save_as` is then refused and says to set
+`--screenshot-dir`; screenshots still come back inline. The shared temp
+directory is deliberately not used as a fallback: any other user on the machine
+can create that name first, as a link to a directory of their own, and receive
+every screenshot.
+
+The checks are made against the filesystem as it is when they run, so they bound
+the `save_as` string - not another process running as the same user, which
+already has that user's own write access.
 
 Omitting `save_as` keeps the original behaviour and returns the image inline.
 
@@ -93,7 +108,7 @@ cargo build --release
 | `--chrome-arg` (repeatable) | — | none (e.g. `--chrome-arg=--no-sandbox`) |
 | `--allow-private-hosts` | `WEB_ALLOW_PRIVATE_HOSTS` | `false` |
 | `--nav-timeout-ms` | `WEB_NAV_TIMEOUT_MS` | `30000` |
-| `--screenshot-dir` | `WEB_SCREENSHOT_DIR` | `$XDG_CACHE_HOME/web-mcp/screenshots` |
+| `--screenshot-dir` | `WEB_SCREENSHOT_DIR` | `$XDG_CACHE_HOME/web-mcp/screenshots`, or none |
 
 A single headless Chrome instance is launched lazily on first browse and reused
 for the life of the process (each request gets its own tab); it is relaunched

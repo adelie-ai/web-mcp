@@ -290,21 +290,80 @@ fn refuses_a_symlinked_directory_before_creating_anything_beneath_it() {
 
 #[cfg(unix)]
 #[test]
-fn refuses_a_screenshot_directory_that_is_itself_a_symbolic_link() {
-    // Resolving a symlinked root would make its target the boundary, so every
-    // later containment check would pass against a directory web-mcp never
-    // chose. That is the shared-temp-directory hijack.
+fn refuses_a_hard_link_that_points_at_a_file_outside_the_root() {
+    // A hard link is a regular file to `symlink_metadata`, so the symlink rule
+    // does not see it. Writing through one destroys a file outside the root.
     let scratch = Scratch::new();
-    let elsewhere = scratch.join("elsewhere");
-    fs::create_dir_all(&elsewhere).expect("create the other directory");
     let root = scratch.join("shots");
-    std::os::unix::fs::symlink(&elsewhere, &root).expect("symlink the root");
+    fs::create_dir_all(&root).expect("create the root");
+    let victim = scratch.join("victim.txt");
+    fs::write(&victim, b"original").expect("seed the victim file");
+    fs::hard_link(&victim, root.join("hard.png")).expect("hard link");
 
     let dir = ScreenshotDir::new(&root);
 
-    assert_refused(dir.save_png("shot.png", PNG_1X1), "a symlinked root");
-    assert!(
-        !elsewhere.join("shot.png").exists(),
-        "nothing may be written through the symlinked root"
+    assert_refused(dir.save_png("hard.png", PNG_1X1), "a hard link");
+    assert_eq!(
+        fs::read(&victim).expect("read back"),
+        b"original",
+        "the file the hard link shares must be untouched"
     );
+}
+
+#[test]
+fn refuses_a_path_deeper_than_the_directory_limit() {
+    // Every component becomes a directory that is never reclaimed, so one call
+    // must not be able to create an unbounded number of them.
+    let scratch = Scratch::new();
+    let root = scratch.join("shots");
+    let dir = ScreenshotDir::new(&root);
+
+    let deep = format!("{}shot.png", "d/".repeat(64));
+    assert_refused(dir.save_png(&deep, PNG_1X1), "a very deep path");
+    assert!(
+        !root.join("d").exists(),
+        "a refused path creates no directory at all"
+    );
+    // The limit is a limit, not a ban on grouping.
+    dir.save_png("a/b/c/shot.png", PNG_1X1)
+        .expect("ordinary grouping is still allowed");
+}
+
+#[test]
+fn refuses_a_path_carrying_a_nul_byte() {
+    // Without this the path passes the checks and fails at the write, so the
+    // page is fetched first and the refusal arrives as an IO error instead.
+    let scratch = Scratch::new();
+    let dir = ScreenshotDir::new(scratch.join("shots"));
+
+    assert_refused(
+        dir.save_png("shot\0.png", PNG_1X1),
+        "a path with a NUL byte",
+    );
+    assert!(
+        dir.check("shot\0.png").is_err(),
+        "and the early check agrees"
+    );
+}
+
+#[test]
+fn refuses_a_trailing_current_directory_component() {
+    // "x.png/." names a directory just as "x.png/" does.
+    let scratch = Scratch::new();
+    let dir = ScreenshotDir::new(scratch.join("shots"));
+
+    assert_refused(dir.save_png("shot.png/.", PNG_1X1), "a trailing '/.'");
+}
+
+#[test]
+fn everything_the_early_check_accepts_is_accepted_by_the_write() {
+    // `check` runs before the page is fetched and must not promise more than
+    // the write delivers for reasons that are in the path itself.
+    let scratch = Scratch::new();
+    let dir = ScreenshotDir::new(scratch.join("shots"));
+
+    for path in ["shot.png", "a/b.png", "Shot.PNG"] {
+        dir.check(path).expect("check accepts it");
+        dir.save_png(path, PNG_1X1).expect("and so does the write");
+    }
 }

@@ -9,10 +9,21 @@
 //!
 //! [`ScreenshotDir`] is the boundary. It owns one directory and resolves every
 //! `save_as` inside it: no parent-directory hop, no absolute path elsewhere, no
-//! symlink out, and no extension other than `.png`. The directory itself must
-//! not be a symbolic link either, or its target would silently become the
-//! boundary. Paths are built with [`Path::join`], never by joining strings, and
-//! a refused path creates nothing.
+//! link out - symbolic or hard - and no extension other than `.png`. Paths are
+//! built with [`Path::join`], never by joining strings, and a refused path
+//! creates nothing.
+//!
+//! What the boundary does not do, stated so nobody reads more into it: the
+//! checks are path-based, so they are made against the filesystem as it is when
+//! they run. Another process running as the same user can replace a checked
+//! path between the check and the write. That process already has the user's
+//! own write access, so it gains nothing it did not have; a caller of this
+//! module gains nothing either. The boundary is against the `save_as` string,
+//! not against a local attacker who is already this user.
+//!
+//! Where the directory itself comes from is the operator's decision, and it is
+//! taken as given here - including through a symbolic link, which resolves and
+//! then bounds everything inside it as normal.
 //!
 //! Non-goals: this module does not capture, decode, or re-encode an image. It
 //! reads the PNG header for the dimensions it reports and writes the bytes it
@@ -27,6 +38,12 @@ use std::path::{Component, Path, PathBuf};
 /// nothing else, so any other extension is a caller mistake - and refusing it
 /// keeps the tool from being steered into writing a shell profile or a script.
 const REQUIRED_EXTENSION: &str = "png";
+
+/// How deep under the directory a `save_as` may go. A screenshot needs a name
+/// and at most a little grouping; a deeper path is a caller creating
+/// directories, not filing a capture. Each component becomes a directory that
+/// is never reclaimed, so the depth is bounded here.
+const MAX_PATH_COMPONENTS: usize = 8;
 
 /// The PNG signature, the first eight bytes of every PNG file.
 const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -144,11 +161,15 @@ impl ScreenshotDir {
             }
         }
 
-        // The file itself can be a symlink whose target is elsewhere. Writing
-        // to a symlink writes through it, so refuse one.
+        // The file itself can be a link whose other end is elsewhere. Writing to
+        // it writes through, so refuse both kinds: a symbolic link, and a file
+        // that already carries more than one name.
         let target = dir.join(name);
         if is_symlink(&target) {
             return Err(refuse(save_as, "it is a symbolic link"));
+        }
+        if is_multiply_linked(&target) {
+            return Err(refuse(save_as, "it is a hard link to another file"));
         }
         Ok(target)
     }
@@ -156,18 +177,10 @@ impl ScreenshotDir {
     /// Create the screenshot directory if it is missing and return its resolved
     /// path, which is the boundary every other path is measured against.
     ///
-    /// The directory itself must not be a symbolic link. Resolving one would
-    /// make its target the boundary, so every containment check afterwards
-    /// would pass against a directory web-mcp never chose. An operator who
-    /// wants a linked location can configure the location it points at.
+    /// Resolving it once, here, is what makes the containment checks below
+    /// meaningful: everything a caller names is compared against the directory
+    /// as the filesystem actually reports it, not as it was written.
     fn resolved_root(&self) -> Result<PathBuf> {
-        if is_symlink(&self.root) {
-            return Err(WebError::InvalidParameters(format!(
-                "the screenshot directory '{}' is a symbolic link; configure the directory it points at instead",
-                self.root.display()
-            ))
-            .into());
-        }
         fs::create_dir_all(&self.root)?;
         Ok(fs::canonicalize(&self.root)?)
     }
@@ -181,6 +194,12 @@ impl ScreenshotDir {
         let trimmed = save_as.trim();
         if trimmed.is_empty() {
             return Err(refuse(save_as, "it is empty"));
+        }
+        // A NUL byte cannot appear in a path the operating system will accept.
+        // Refusing it here rather than at the write keeps every path refusal a
+        // parameter refusal, answered before the page is fetched.
+        if trimmed.contains('\0') {
+            return Err(refuse(save_as, "it contains a NUL byte"));
         }
 
         let given = Path::new(trimmed);
@@ -215,13 +234,22 @@ impl ScreenshotDir {
             }
         }
 
-        // A trailing separator drops out of `components()`, so compare the last
-        // component against the raw text to catch a path that names a directory.
-        if trimmed.ends_with('/') || trimmed.ends_with(std::path::MAIN_SEPARATOR) {
+        let file_name = relative
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(|| refuse(save_as, "it does not name a file"))?;
+        // A trailing separator and a trailing "/." both drop out of the
+        // components above, leaving a path that resolves to a name the caller
+        // did not finish writing. Requiring the text to end in the name it
+        // resolves to catches every such form at once.
+        if !trimmed.ends_with(file_name) {
             return Err(refuse(save_as, "it names a directory, not a file"));
         }
-        if relative.file_name().is_none() {
-            return Err(refuse(save_as, "it does not name a file"));
+        if relative.components().count() > MAX_PATH_COMPONENTS {
+            return Err(refuse(
+                save_as,
+                "it goes more than 8 levels under the screenshot directory",
+            ));
         }
         let is_png = relative
             .extension()
@@ -248,6 +276,22 @@ impl ScreenshotDir {
 /// or that cannot be read, is not one.
 fn is_symlink(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+/// True when `path` exists and already carries more than one name, so writing
+/// to it would write through to a file that may be outside the directory. A
+/// hard link is a regular file to [`fs::symlink_metadata`], so the link count
+/// is the only thing that tells the two apart.
+#[cfg(unix)]
+fn is_multiply_linked(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.nlink() > 1)
+}
+
+/// Link counts are not available here, so nothing is refused on that ground.
+#[cfg(not(unix))]
+fn is_multiply_linked(_path: &Path) -> bool {
+    false
 }
 
 /// Build the refusal for a `save_as` the directory will not accept. The path is

@@ -38,7 +38,8 @@ struct Local {
     nav_timeout_ms: u64,
     /// Directory web_screenshot writes a `save_as` file into. A caller may name
     /// a path inside it and nowhere else. Defaults to
-    /// $XDG_CACHE_HOME/web-mcp/screenshots.
+    /// $XDG_CACHE_HOME/web-mcp/screenshots; without a per-user cache directory
+    /// there is no default and save_as is refused.
     #[arg(long, env = "WEB_SCREENSHOT_DIR")]
     screenshot_dir: Option<PathBuf>,
 }
@@ -62,7 +63,7 @@ async fn main() -> mcp_core::Result<()> {
             chrome_args: local.chrome_arg,
             allow_private_hosts: local.allow_private_hosts,
             nav_timeout_ms: local.nav_timeout_ms,
-            screenshot_dir: local.screenshot_dir.unwrap_or_else(default_screenshot_dir),
+            screenshot_dir: local.screenshot_dir.or_else(default_screenshot_dir),
         };
         Ok(WebService::with_config(web_config))
     })

@@ -58,8 +58,10 @@ pub fn server_config() -> ServerConfig {
 pub struct WebService {
     browser: BrowserManager,
     guard: UrlGuard,
-    /// The one directory a `save_as` screenshot may be written into.
-    screenshots: ScreenshotDir,
+    /// The one directory a `save_as` screenshot may be written into, or `None`
+    /// when none is configured - in which case `save_as` is refused and the
+    /// inline image still works.
+    screenshots: Option<ScreenshotDir>,
 }
 
 impl WebService {
@@ -72,7 +74,7 @@ impl WebService {
     pub fn with_config(config: WebConfig) -> Self {
         let config = Arc::new(config);
         let guard = UrlGuard::new(config.allow_private_hosts);
-        let screenshots = ScreenshotDir::new(config.screenshot_dir.clone());
+        let screenshots = config.screenshot_dir.clone().map(ScreenshotDir::new);
         let browser = BrowserManager::new(Arc::clone(&config));
         Self {
             browser,
@@ -107,13 +109,13 @@ impl WebService {
         // Chrome is launched: a caller who names an unusable path should get
         // that answer without any page being fetched.
         if let Some(path) = save_as.as_deref() {
-            self.screenshots.check(path)?;
+            screenshot_dir(self.screenshots.as_ref())?.check(path)?;
         }
         let url = self.guard.check(raw_url).await?;
         let full_page = get_bool(args, "full_page").unwrap_or(false);
 
         let png = self.browser.screenshot(&url, full_page).await?;
-        screenshot_reply(&self.screenshots, &png, save_as.as_deref())
+        screenshot_reply(self.screenshots.as_ref(), &png, save_as.as_deref())
     }
 }
 
@@ -280,14 +282,33 @@ fn get_u64(args: &Value, key: &str) -> Option<u64> {
 /// `web_screenshot` has always done and what a caller with no filesystem of its
 /// own still needs.
 fn screenshot_reply(
-    dir: &ScreenshotDir,
+    dir: Option<&ScreenshotDir>,
     png: &[u8],
     save_as: Option<&str>,
 ) -> Result<ToolReply, WebMcpError> {
     match save_as {
-        Some(path) => Ok(ToolReply::json(&dir.save_png(path, png)?)?),
+        Some(path) => Ok(ToolReply::json(&screenshot_dir(dir)?.save_png(path, png)?)?),
         None => Ok(image_reply(png)),
     }
+}
+
+/// The screenshot directory, or the refusal to give a caller when the server
+/// has none.
+///
+/// Why a refusal and not a temporary directory: the server reaches here only
+/// when no directory was configured and none could be defaulted safely, and
+/// inventing one at that point is how a shared location gets used by accident.
+/// The message names the flag, because the operator is the one who can fix it,
+/// and the caller can drop `save_as` and still get the image.
+fn screenshot_dir(dir: Option<&ScreenshotDir>) -> Result<&ScreenshotDir, WebMcpError> {
+    dir.ok_or_else(|| {
+        WebError::InvalidParameters(
+            "save_as needs a screenshot directory, and this server has none: \
+             start it with --screenshot-dir, or omit save_as to get the image inline"
+                .to_string(),
+        )
+        .into()
+    })
 }
 
 /// Build a [`ToolReply`] carrying PNG bytes as an MCP `image` content block
@@ -327,7 +348,7 @@ mod tests {
         // The compatible default: a caller that names no path still gets the
         // PNG in the reply, exactly as before save_as existed.
         let dir = ScreenshotDir::new(scratch_dir("inline"));
-        let reply = screenshot_reply(&dir, TINY_PNG, None).expect("inline reply");
+        let reply = screenshot_reply(Some(&dir), TINY_PNG, None).expect("inline reply");
 
         let Content::Raw(block) = &reply.content[0] else {
             panic!("expected a raw image content block");
@@ -342,7 +363,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = ScreenshotDir::new(&root);
 
-        let reply = screenshot_reply(&dir, TINY_PNG, Some("shot.png")).expect("saved reply");
+        let reply = screenshot_reply(Some(&dir), TINY_PNG, Some("shot.png")).expect("saved reply");
 
         let structured = reply
             .structured_content
@@ -369,7 +390,7 @@ mod tests {
         let root = scratch_dir("escape");
         let dir = ScreenshotDir::new(&root);
 
-        match screenshot_reply(&dir, TINY_PNG, Some("../escaped.png")) {
+        match screenshot_reply(Some(&dir), TINY_PNG, Some("../escaped.png")) {
             Err(WebMcpError::Web(WebError::InvalidParameters(_))) => {}
             other => panic!("expected an invalid-parameter refusal, got {other:?}"),
         }

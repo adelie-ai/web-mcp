@@ -31,9 +31,11 @@ fn environment_handed_to_the_browser(scratch: &Path) -> Vec<(String, String)> {
     // The record path is written into the stub rather than passed through the
     // environment, because passing it through is exactly what this test proves
     // does not work.
+    // `env -0` separates entries with NUL, so a value containing a newline
+    // cannot be mistaken for the start of another entry.
     fs::write(
         &stub,
-        format!("#!/bin/sh\nenv > '{}'\nexit 0\n", record.display()),
+        format!("#!/bin/sh\nenv -0 > '{}'\nexit 0\n", record.display()),
     )
     .expect("write the stub browser");
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("make the stub runnable");
@@ -81,7 +83,8 @@ fn environment_handed_to_the_browser(scratch: &Path) -> Vec<(String, String)> {
 
     let recorded = fs::read_to_string(&record).expect("the stub browser recorded its environment");
     recorded
-        .lines()
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
         .filter_map(|entry| entry.split_once('='))
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()
