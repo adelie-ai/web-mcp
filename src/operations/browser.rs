@@ -55,6 +55,87 @@ fn chrome_launch_args(user_args: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// The only variables web-mcp passes from its own environment into the Chrome
+/// child. Everything else is hidden from it - see [`chrome_env`].
+///
+/// The list is short on purpose. Each entry is here because Chrome needs it to
+/// reach the host session, to start at all, to render in the right language, or
+/// to reach the network the way the operator configured it. Nothing on it
+/// carries a credential.
+const CHROME_ENV_ALLOWLIST: &[&str] = &[
+    // Reach the host session. An X11 session needs the display address and the
+    // authorization cookie that goes with it; a Wayland session needs the
+    // socket name and the runtime directory that holds the socket. The session
+    // type tells Chrome which of the two to prefer.
+    "DISPLAY",
+    "XAUTHORITY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    // Start at all. Chrome resolves its helper programs on PATH, derives its
+    // cache and crash-report paths from HOME, writes scratch files under
+    // TMPDIR, and finds its own shared libraries through LD_LIBRARY_PATH when
+    // it is not a system install.
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LD_LIBRARY_PATH",
+    // Render in the operator's language and report the operator's local time to
+    // page scripts.
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    // Reach the network through the operator's proxy. Both spellings, because
+    // different libraries read different ones.
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+];
+
+/// Build the environment for the Chrome child out of `parent`, this process's
+/// own environment.
+///
+/// A name on [`CHROME_ENV_ALLOWLIST`] keeps its value. Every other name is
+/// mapped to an empty value.
+///
+/// Why map rather than drop: a child process inherits its parent's whole
+/// environment, and chromiumoxide gives no way to clear it - the entries it
+/// takes are applied on top of what the child already inherited. Setting a name
+/// to an empty value is therefore how web-mcp removes it. The name still
+/// reaches Chrome; the value does not, and the value is what leaks. This
+/// matters most when web-mcp is hosted in-process inside a desktop client,
+/// where this process's environment is the client's own - API keys, tokens, and
+/// the session-bus address that fronts the desktop credential store.
+///
+/// A variable the parent does not have is not invented, because an empty value
+/// is not the same as an absent one: an empty `DISPLAY` would make Chrome try
+/// to open a display that is not there.
+///
+/// One limit, stated plainly: a variable whose name is not valid UTF-8 cannot be
+/// named in the `String` map chromiumoxide takes, so it passes through
+/// inherited. An allowlisted variable whose value is not valid UTF-8 is left
+/// inherited too, rather than forwarded through a lossy conversion that would
+/// corrupt it.
+fn chrome_env<I>(parent: I) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+{
+    parent
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let name = name.into_string().ok()?;
+            if CHROME_ENV_ALLOWLIST.contains(&name.as_str()) {
+                value.into_string().ok().map(|value| (name, value))
+            } else {
+                Some((name, String::new()))
+            }
+        })
+        .collect()
+}
+
 /// JS that collects every absolute http(s) link with its visible text.
 const LINKS_JS: &str = "Array.from(document.querySelectorAll('a[href]'))\
 .map(a => ({ href: a.href, text: (a.innerText || '').trim() }))\
@@ -117,6 +198,7 @@ impl BrowserManager {
         for arg in chrome_launch_args(&self.config.chrome_args) {
             builder = builder.arg(arg);
         }
+        builder = builder.envs(chrome_env(std::env::vars_os()));
         let cfg = builder.build().map_err(WebError::Navigation)?;
 
         let (browser, mut handler) = Browser::launch(cfg).await?;
