@@ -306,6 +306,7 @@ fn truncate(s: String, max_chars: usize) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn truncate_respects_char_boundaries() {
@@ -392,6 +393,106 @@ mod tests {
             Some(url.as_str()),
             "the event must carry the url that was navigated to"
         );
+    }
+
+    /// The environment a desktop session hands a process it starts, plus one
+    /// value a host process might hold that Chrome has no reason to see.
+    fn desktop_session_env() -> Vec<(OsString, OsString)> {
+        [
+            ("DISPLAY", ":0"),
+            ("XAUTHORITY", "/run/user/1000/xauth"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("XDG_SESSION_TYPE", "wayland"),
+            ("PATH", "/usr/bin:/bin"),
+            ("HOME", "/home/user"),
+            ("LANG", "en_GB.UTF-8"),
+            ("ANTHROPIC_API_KEY", "a-real-secret"),
+            ("DATABASE_URL", "postgres://user:pass@db/adele"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        .collect()
+    }
+
+    fn value_of<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn chrome_env_forwards_the_display_variables() {
+        // A browser that must reach the host session needs the X11 display and
+        // its cookie, or the Wayland socket and the runtime directory holding
+        // it. Without these a headed browser has no session to draw into.
+        let env = chrome_env(desktop_session_env());
+        assert_eq!(value_of(&env, "DISPLAY"), Some(":0"));
+        assert_eq!(value_of(&env, "XAUTHORITY"), Some("/run/user/1000/xauth"));
+        assert_eq!(value_of(&env, "WAYLAND_DISPLAY"), Some("wayland-0"));
+        assert_eq!(value_of(&env, "XDG_RUNTIME_DIR"), Some("/run/user/1000"));
+        assert_eq!(value_of(&env, "XDG_SESSION_TYPE"), Some("wayland"));
+    }
+
+    #[test]
+    fn chrome_env_forwards_what_chrome_needs_to_start() {
+        let env = chrome_env(desktop_session_env());
+        assert_eq!(value_of(&env, "PATH"), Some("/usr/bin:/bin"));
+        assert_eq!(value_of(&env, "HOME"), Some("/home/user"));
+        assert_eq!(value_of(&env, "LANG"), Some("en_GB.UTF-8"));
+    }
+
+    #[test]
+    fn chrome_env_keeps_no_value_from_outside_the_allowlist() {
+        // web-mcp can be hosted in-process inside a desktop client, so this
+        // process's environment can hold that client's own secrets. None of
+        // those values may travel into the browser it spawns.
+        let env = chrome_env(desktop_session_env());
+        for hidden in [
+            "ANTHROPIC_API_KEY",
+            "DATABASE_URL",
+            "DBUS_SESSION_BUS_ADDRESS",
+        ] {
+            assert_eq!(
+                value_of(&env, hidden),
+                Some(""),
+                "{hidden} must reach Chrome with no value"
+            );
+        }
+    }
+
+    #[test]
+    fn chrome_env_forwards_a_value_only_for_an_allowlisted_name() {
+        // The general property behind the two tests above: every entry either
+        // names an allowlisted variable and carries its value, or carries
+        // nothing at all.
+        let parent = desktop_session_env();
+        let env = chrome_env(parent.clone());
+        for (name, value) in &env {
+            if value.is_empty() {
+                continue;
+            }
+            assert!(
+                CHROME_ENV_ALLOWLIST.contains(&name.as_str()),
+                "{name} carries a value but is not on the allowlist"
+            );
+            let original = parent
+                .iter()
+                .find(|(key, _)| key == name.as_str())
+                .expect("the name came from the parent environment");
+            assert_eq!(value.as_str(), original.1.to_string_lossy());
+        }
+    }
+
+    #[test]
+    fn chrome_env_does_not_invent_a_variable_the_parent_lacks() {
+        // A headless container has no display. web-mcp must not hand Chrome an
+        // empty DISPLAY there, because an empty value is not the same as no
+        // value: Chrome would try to open it and fail.
+        let env = chrome_env([(OsString::from("PATH"), OsString::from("/usr/bin"))]);
+        assert_eq!(value_of(&env, "DISPLAY"), None);
+        assert_eq!(value_of(&env, "WAYLAND_DISPLAY"), None);
     }
 
     const AUTOMATION_FLAG: &str = "--disable-blink-features=AutomationControlled";
