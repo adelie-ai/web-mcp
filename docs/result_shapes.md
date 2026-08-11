@@ -2,7 +2,8 @@
 
 `web_read` returns its JSON payload as a single `type: "text"` content entry
 (the payload serialized to a string) plus a `structuredContent` mirror for typed
-clients; `web_screenshot` returns a `type: "image"` entry:
+clients. `web_screenshot` returns the same JSON shape when it is given
+`save_as`, and a `type: "image"` entry when it is not:
 
 ```json
 { "content": [ { "type": "text",  "text": "<json string>" } ], "structuredContent": <payload> }
@@ -47,8 +48,30 @@ request) are still reported as JSON-RPC errors.
   link on the page as `{href, text}`.
 - `url` is the final URL after any redirects.
 
-## `web_screenshot` → image
+## `web_screenshot` → saved file, or image
 
-A `type: "image"` content entry with base64-encoded PNG bytes and
-`mimeType: "image/png"`. `full_page: true` captures the entire scrollable page;
-the default captures just the viewport.
+With `save_as`, the PNG is written to a file inside the server's screenshot
+directory and the reply carries metadata only:
+
+```json
+{
+  "path": "/home/<user>/.cache/web-mcp/screenshots/example-home.png",
+  "bytes": 245760,
+  "width": 1920,
+  "height": 1080
+}
+```
+
+- `path` is the absolute path of the written file.
+- `bytes` is its size on disk.
+- `width` and `height` come from the PNG header. Both are omitted if that header
+  cannot be read.
+
+Without `save_as`, the reply is a `type: "image"` content entry with
+base64-encoded PNG bytes and `mimeType: "image/png"`.
+
+`full_page: true` captures the entire scrollable page in either form; the
+default captures just the viewport.
+
+A `save_as` outside the screenshot directory is refused as a tool error, the
+same as a blocked URL. See the README for the rules.

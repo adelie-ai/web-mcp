@@ -14,11 +14,59 @@ No API keys are required.
 | Tool | Purpose |
 | --- | --- |
 | `web_read` | Open a URL in headless Chrome and return rendered `text` (default) or `html`, optionally with the page's outbound links. Content is character-capped (`max_chars`, default 50k) with a `truncated` flag. |
-| `web_screenshot` | Open a URL in headless Chrome and return a PNG screenshot (viewport or `full_page`) as an MCP image. |
+| `web_screenshot` | Open a URL in headless Chrome and capture a PNG screenshot (viewport or `full_page`). With `save_as`, write it to a file and return the path, the size and the pixel dimensions; without `save_as`, return the image inline. |
 
-Read results are returned as a `type: "json"` content entry; screenshots as a
-`type: "image"` (base64 PNG). See
+Read results are returned as a `type: "json"` content entry; screenshots as
+metadata or, without `save_as`, a `type: "image"` (base64 PNG). See
 [`docs/result_shapes.md`](docs/result_shapes.md).
+
+### Screenshots: prefer `save_as`
+
+An inline PNG travels back as base64 and lands in the model's context, which
+costs a large part of the context window for something the caller usually only
+needs a path to. Give `save_as` a file name and web-mcp writes the file instead:
+
+```json
+{ "url": "https://example.com", "save_as": "example-home.png" }
+```
+
+`save_as` is a path **inside the screenshot directory** (`--screenshot-dir`,
+default `$XDG_CACHE_HOME/web-mcp/screenshots`). Missing subdirectories are
+created and an existing file is replaced, so the same call twice leaves one
+file. Everything else is refused:
+
+- a `..` component, and an absolute path outside the directory;
+- a symbolic link as the target or on the way to it, and a file that already
+  has another name elsewhere (a hard link), because writing would change that
+  file too. This can refuse a file web-mcp wrote itself, if something has since
+  linked to it - a deduplication pass over a cache directory does that. Use
+  another name;
+- a name that is not `.png` (the check ignores case, so `.PNG` is accepted);
+- a path more than eight levels under the directory, because every level becomes
+  a directory that is never reclaimed.
+
+A path refused on its own text is refused before the page is fetched, so it
+costs no lookup and no page load, and creates nothing.
+
+There is **no default directory** when neither `$XDG_CACHE_HOME` nor `$HOME`
+gives an absolute path, which is what happens when the host strips the
+environment of the servers it spawns. `save_as` is then refused and says to set
+`--screenshot-dir`; screenshots still come back inline. The shared temp
+directory is deliberately not used as a fallback: any other user on the machine
+can create that name first, as a link to a directory of their own, and receive
+every screenshot.
+
+**Give `--screenshot-dir` a directory only this user can write.** A location
+under a shared directory such as `/tmp` can be created, or linked elsewhere, by
+another user before web-mcp starts; web-mcp resolves the directory it is given
+and would then treat theirs as the boundary. This is why there is no shared-
+directory default, and it applies to the flag as well.
+
+The checks are made against the filesystem as it is when they run, so they bound
+the `save_as` string - not another process running as the same user, which
+already has that user's own write access.
+
+Omitting `save_as` keeps the original behaviour and returns the image inline.
 
 ### No `web_search` tool — discovery via `web_read`
 
@@ -69,10 +117,35 @@ cargo build --release
 | `--chrome-arg` (repeatable) | — | none (e.g. `--chrome-arg=--no-sandbox`) |
 | `--allow-private-hosts` | `WEB_ALLOW_PRIVATE_HOSTS` | `false` |
 | `--nav-timeout-ms` | `WEB_NAV_TIMEOUT_MS` | `30000` |
+| `--screenshot-dir` | `WEB_SCREENSHOT_DIR` | `$XDG_CACHE_HOME/web-mcp/screenshots`, or none |
 
 A single headless Chrome instance is launched lazily on first browse and reused
 for the life of the process (each request gets its own tab); it is relaunched
 automatically if it dies.
+
+### The Chrome process environment
+
+A child process inherits its parent's whole environment. web-mcp can be hosted
+in-process inside a desktop client, so that environment can be the client's own,
+including its API keys. web-mcp therefore names what the browser may see, and
+every other variable reaches it with an empty value:
+
+| Variable | Why Chrome needs it |
+| --- | --- |
+| `DISPLAY`, `XAUTHORITY` | Address of the X11 server, and the authorization cookie for it |
+| `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` | Name of the Wayland socket, and the directory holding it |
+| `XDG_SESSION_TYPE` | Which of the two the session uses |
+| `PATH`, `HOME`, `TMPDIR`, `LD_LIBRARY_PATH` | Helper programs, cache and crash paths, scratch files, and its own shared libraries |
+| `LANG`, `LC_ALL`, `TZ` | Rendering language, and local time reported to page scripts |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (both spellings) | Outbound HTTP through the operator's proxy |
+
+A variable web-mcp does not itself have is not invented, so an absent `DISPLAY`
+stays absent rather than becoming empty.
+
+When a host strips the environment of the servers it spawns, web-mcp only passes
+on what it was given. To make the display variables reach the browser in that
+case, grant them to web-mcp in the host's own configuration - for the Adele
+daemon and its client-side MCP host, that is the server's `inherit_env` list.
 
 ## Logging
 

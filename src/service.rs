@@ -15,6 +15,7 @@
 use crate::config::WebConfig;
 use crate::error::{WebError, WebMcpError};
 use crate::operations::browser::BrowserManager;
+use crate::screenshot::ScreenshotDir;
 use crate::url_guard::UrlGuard;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -57,6 +58,10 @@ pub fn server_config() -> ServerConfig {
 pub struct WebService {
     browser: BrowserManager,
     guard: UrlGuard,
+    /// The one directory a `save_as` screenshot may be written into, or `None`
+    /// when none is configured - in which case `save_as` is refused and the
+    /// inline image still works.
+    screenshots: Option<ScreenshotDir>,
 }
 
 impl WebService {
@@ -69,8 +74,13 @@ impl WebService {
     pub fn with_config(config: WebConfig) -> Self {
         let config = Arc::new(config);
         let guard = UrlGuard::new(config.allow_private_hosts);
+        let screenshots = config.screenshot_dir.clone().map(ScreenshotDir::new);
         let browser = BrowserManager::new(Arc::clone(&config));
-        Self { browser, guard }
+        Self {
+            browser,
+            guard,
+            screenshots,
+        }
     }
 
     // `args` carries the url and is skipped: a tool argument is content, so it
@@ -94,11 +104,18 @@ impl WebService {
     #[tracing::instrument(skip(self, args))]
     async fn execute_screenshot(&self, args: &Value) -> Result<ToolReply, WebMcpError> {
         let raw_url = require_str(args, "url")?;
+        let save_as = get_str(args, "save_as").map(str::to_owned);
+        // A refused `save_as` is settled before the URL is resolved and before
+        // Chrome is launched: a caller who names an unusable path should get
+        // that answer without any page being fetched.
+        if let Some(path) = save_as.as_deref() {
+            screenshot_dir(self.screenshots.as_ref())?.check(path)?;
+        }
         let url = self.guard.check(raw_url).await?;
         let full_page = get_bool(args, "full_page").unwrap_or(false);
 
         let png = self.browser.screenshot(&url, full_page).await?;
-        Ok(image_reply(&png))
+        screenshot_reply(self.screenshots.as_ref(), &png, save_as.as_deref())
     }
 }
 
@@ -141,13 +158,17 @@ impl McpService for WebService {
             ),
             ToolDef::new(
                 "web_screenshot",
-                "Take a screenshot of a web page and return it as a PNG image. Reach for this when you need to see how a page actually looks - its layout, images, charts, maps, or other visual content that plain-text extraction (web_read) misses - rather than its text. Set full_page=true to capture the entire scrollable page instead of just the visible viewport. Same URL rules as web_read: http(s) only, and private/loopback hosts are refused by default.",
+                "Take a screenshot of a web page as a PNG image. Reach for this when you need to see how a page actually looks - its layout, images, charts, maps, or other visual content that plain-text extraction (web_read) misses - rather than its text. Set full_page=true to capture the entire scrollable page instead of just the visible viewport. Same URL rules as web_read: http(s) only, and private/loopback hosts are refused by default.\n\nPREFER save_as: give a file name and the image is written to disk and the reply is metadata only - the path, the byte size and the pixel dimensions. Without save_as the PNG comes back inline as base64, which costs a large part of the context window for something you usually only need a path to. Use the inline form only when you must look at the picture yourself in this turn.",
                 json!({
                     "type": "object",
                     "properties": {
                         "url": {
                             "type": "string",
                             "description": "The absolute http(s) URL to capture. Example: 'https://example.com'."
+                        },
+                        "save_as": {
+                            "type": "string",
+                            "description": "Write the PNG here and return metadata instead of the image. A path inside the server's screenshot directory, for example 'example-home.png' or 'reports/pricing.png'; missing subdirectories are created and an existing file is replaced. It must end in '.png', and '..' or any path outside that directory is refused. Omit this only when you need the image inline in the reply."
                         },
                         "full_page": {
                             "type": "boolean",
@@ -253,6 +274,43 @@ fn get_u64(args: &Value, key: &str) -> Option<u64> {
         .or_else(|| v.as_str()?.parse::<u64>().ok())
 }
 
+/// Turn captured PNG bytes into the reply the caller asked for.
+///
+/// With `save_as`, the file is written and the reply is metadata only - path,
+/// size, pixel dimensions - which keeps a base64 image out of the model's
+/// context. Without it, the image comes back inline, which is what
+/// `web_screenshot` has always done and what a caller with no filesystem of its
+/// own still needs.
+fn screenshot_reply(
+    dir: Option<&ScreenshotDir>,
+    png: &[u8],
+    save_as: Option<&str>,
+) -> Result<ToolReply, WebMcpError> {
+    match save_as {
+        Some(path) => Ok(ToolReply::json(&screenshot_dir(dir)?.save_png(path, png)?)?),
+        None => Ok(image_reply(png)),
+    }
+}
+
+/// The screenshot directory, or the refusal to give a caller when the server
+/// has none.
+///
+/// Why a refusal and not a temporary directory: the server reaches here only
+/// when no directory was configured and none could be defaulted safely, and
+/// inventing one at that point is how a shared location gets used by accident.
+/// The message names the flag, because the operator is the one who can fix it,
+/// and the caller can drop `save_as` and still get the image.
+fn screenshot_dir(dir: Option<&ScreenshotDir>) -> Result<&ScreenshotDir, WebMcpError> {
+    dir.ok_or_else(|| {
+        WebError::InvalidParameters(
+            "save_as needs a screenshot directory, and this server has none: \
+             start it with --screenshot-dir, or omit save_as to get the image inline"
+                .to_string(),
+        )
+        .into()
+    })
+}
+
 /// Build a [`ToolReply`] carrying PNG bytes as an MCP `image` content block
 /// (base64-encoded). MCP's text/structured helpers don't cover images, so this
 /// uses the raw-content escape hatch.
@@ -269,6 +327,132 @@ fn image_reply(png: &[u8]) -> ToolReply {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A 1x1 PNG header - enough for the reply to report a size.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    ];
+
+    /// A screenshot directory under the system temp dir, unique to this test
+    /// binary's process so a parallel run cannot collide with it.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "web-mcp-service-test-{}-{name}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn screenshot_reply_without_save_as_returns_the_image_inline() {
+        // The compatible default: a caller that names no path still gets the
+        // PNG in the reply, exactly as before save_as existed.
+        let dir = ScreenshotDir::new(scratch_dir("inline"));
+        let reply = screenshot_reply(Some(&dir), TINY_PNG, None).expect("inline reply");
+
+        let Content::Raw(block) = &reply.content[0] else {
+            panic!("expected a raw image content block");
+        };
+        assert_eq!(block["mimeType"], json!("image/png"));
+        assert!(!dir.root().exists(), "no file is written without save_as");
+    }
+
+    #[test]
+    fn screenshot_reply_with_save_as_returns_metadata_and_no_image() {
+        let root = scratch_dir("metadata");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = ScreenshotDir::new(&root);
+
+        let reply = screenshot_reply(Some(&dir), TINY_PNG, Some("shot.png")).expect("saved reply");
+
+        let structured = reply
+            .structured_content
+            .as_ref()
+            .expect("a saved screenshot reports structured metadata");
+        assert_eq!(structured["bytes"], json!(TINY_PNG.len()));
+        assert_eq!(structured["width"], json!(1));
+        assert_eq!(structured["height"], json!(1));
+        let path = structured["path"].as_str().expect("a path");
+        assert!(std::path::Path::new(path).is_file(), "{path} should exist");
+        // The image itself must not travel back with it - that is the point.
+        assert!(
+            reply
+                .content
+                .iter()
+                .all(|block| !matches!(block, Content::Raw(_))),
+            "a saved screenshot must not also carry the image inline"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn screenshot_reply_refuses_a_save_as_outside_the_directory() {
+        let root = scratch_dir("escape");
+        let dir = ScreenshotDir::new(&root);
+
+        match screenshot_reply(Some(&dir), TINY_PNG, Some("../escaped.png")) {
+            Err(WebMcpError::Web(WebError::InvalidParameters(_))) => {}
+            other => panic!("expected an invalid-parameter refusal, got {other:?}"),
+        }
+        assert!(!root.exists(), "a refused path creates nothing");
+    }
+
+    #[test]
+    fn without_a_screenshot_directory_save_as_is_refused_and_names_the_flag() {
+        // The server reaches this whenever the host strips its environment and
+        // no directory was configured. The caller must be told what to do, and
+        // the operator must be told what to set.
+        match screenshot_reply(None, TINY_PNG, Some("shot.png")) {
+            Err(WebMcpError::Web(WebError::InvalidParameters(message))) => {
+                assert!(
+                    message.contains("--screenshot-dir"),
+                    "the refusal should name the flag that fixes it: {message}"
+                );
+            }
+            other => panic!("expected an invalid-parameter refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn without_a_screenshot_directory_the_image_still_comes_back_inline() {
+        // The other half: no directory takes save_as away, not screenshots.
+        let reply = screenshot_reply(None, TINY_PNG, None).expect("inline reply");
+        let Content::Raw(block) = &reply.content[0] else {
+            panic!("expected a raw image content block");
+        };
+        assert_eq!(block["mimeType"], json!("image/png"));
+    }
+
+    #[test]
+    fn a_service_built_without_a_screenshot_directory_holds_none() {
+        // The wiring, not just the helper: a config carrying no directory must
+        // reach the service as no directory.
+        let config = WebConfig {
+            screenshot_dir: None,
+            ..WebConfig::default()
+        };
+        assert!(WebService::with_config(config).screenshots.is_none());
+    }
+
+    #[test]
+    fn web_screenshot_schema_offers_save_as_and_still_requires_only_the_url() {
+        // save_as is optional: omitting it keeps the pre-existing inline-image
+        // behaviour, so an existing caller is not broken by this parameter.
+        let tools = WebService::new().tools();
+        let shot = tools
+            .iter()
+            .find(|t| t.name == "web_screenshot")
+            .expect("web_screenshot is exposed");
+        assert!(
+            shot.input_schema["properties"]["save_as"].is_object(),
+            "web_screenshot should accept save_as"
+        );
+        assert_eq!(shot.input_schema["required"], json!(["url"]));
+        assert!(
+            shot.description.contains("save_as"),
+            "the description should tell the model to prefer save_as"
+        );
+    }
 
     #[test]
     fn require_str_rejects_empty_and_missing() {
